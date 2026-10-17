@@ -19,6 +19,8 @@ namespace WindowsRug
 {
     public static class App
     {
+        public const string Version = "1.4.1";
+
         public static void Log(Exception ex)
         {
             try
@@ -1639,6 +1641,7 @@ namespace WindowsRug
             hotkey = new HotkeyWindow(ToggleLaser);
             hotkey.OnRecall = RecallRugs;
             BuildTray();
+            if (!FurnitureFilesPresent) WarnMissingFiles();
 
             catTimer.Tick += delegate { CatTick(); };
             ScheduleCat(true);
@@ -1834,19 +1837,50 @@ namespace WindowsRug
         readonly Dictionary<FurnitureForm, GlowForm> glows = new Dictionary<FurnitureForm, GlowForm>();
         string FurnitureFile { get { return Path.Combine(AppData, "furniture.txt"); } }
 
+        // Where each piece goes in a freshly furnished room (bottom-right corner).
+        static PointF DefaultSpot(string kind)
+        {
+            var a = Screen.PrimaryScreen.WorkingArea;
+            float k = Math.Max(0.7f, Math.Min(1.6f, a.Height / 1040f));
+            float sx = a.Right - 310 * k, sy = a.Bottom - 225 * k;
+            if (kind == "sofa") return new PointF(sx, sy);
+            if (kind == "table") return new PointF(sx - 70 * k, sy - 270 * k);
+            if (kind == "lamp") return new PointF(sx - 360 * k, sy + 120 * k);
+            return new PointF(a.Right - 130 * k, a.Top + 140 * k);
+        }
+
+        public bool FurnitureFilesPresent
+        {
+            get
+            {
+                foreach (var n in new[] { "sofa", "table", "lamp-off", "lamp-on", "plant" })
+                    if (!File.Exists(Path.Combine(Dir, "furniture", n + ".png"))) return false;
+                return true;
+            }
+        }
+
+        // Puts every piece back in its default place (adding any that are missing).
+        public void ResetRoom()
+        {
+            foreach (var f in Furniture.ToArray()) RemoveFurniture(f);
+            foreach (var kind in FurnitureForm.Kinds) { var p = DefaultSpot(kind); AddFurniture(kind, p.X, p.Y, 0, kind == "lamp"); }
+            SaveFurniture();
+            if (!FurnitureFilesPresent) WarnMissingFiles();
+        }
+
+        void WarnMissingFiles()
+        {
+            App.Log(new FileNotFoundException("furniture images missing in " + Path.Combine(Dir, "furniture")));
+            if (tray != null) tray.ShowBalloonTip(6000, "ملفات الأوضة ناقصة", "فك ضغط WindowsRug.zip الجديد وشغّل Install.bat تاني.", ToolTipIcon.Warning);
+        }
+
         void LoadFurniture()
         {
             var inv = CultureInfo.InvariantCulture;
             if (!File.Exists(FurnitureFile))
             {
                 // First time: a corner sofa at the bottom right with a table, a lamp and a plant.
-                var a = Screen.PrimaryScreen.WorkingArea;
-                float k = Math.Max(0.7f, Math.Min(1.6f, a.Height / 1040f));
-                float sx = a.Right - 310 * k, sy = a.Bottom - 225 * k;
-                AddFurniture("sofa", sx, sy, 0, false);
-                AddFurniture("table", sx - 70 * k, sy - 270 * k, 0, false);
-                AddFurniture("lamp", sx - 360 * k, sy + 120 * k, 0, true);
-                AddFurniture("plant", a.Right - 130 * k, a.Top + 140 * k, 0, false);
+                foreach (var kind in FurnitureForm.Kinds) { var p = DefaultSpot(kind); AddFurniture(kind, p.X, p.Y, 0, kind == "lamp"); }
                 SaveFurniture();
                 return;
             }
@@ -1856,7 +1890,10 @@ namespace WindowsRug
                 {
                     var f = line.Split(' ');
                     if (f.Length != 5) continue;
-                    AddFurniture(f[0], float.Parse(f[1], inv), float.Parse(f[2], inv), int.Parse(f[3]), f[4] == "1");
+                    float fx = float.Parse(f[1], inv), fy = float.Parse(f[2], inv);
+                    // A piece left off-screen (a monitor unplugged, a resolution change) comes back.
+                    if (!SystemInformation.VirtualScreen.Contains((int)fx, (int)fy)) { var d = DefaultSpot(f[0]); fx = d.X; fy = d.Y; }
+                    AddFurniture(f[0], fx, fy, int.Parse(f[3]), f[4] == "1");
                 }
             }
             catch { }
@@ -1951,11 +1988,13 @@ namespace WindowsRug
             }
             var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
             menu.Items.Add("رجّع السجاد قدامي (Ctrl+Alt+R)", null, delegate { RecallRugs(); });
+            menu.Items.Add("رجّع الأوضة مكانها", null, delegate { ResetRoom(); });
             menu.Items.Add("سجادة جديدة", null, delegate { AddRug(Rugs.Count > 0 ? Rugs[0] : null); });
             menu.Items.Add("ليزر للقطة (Ctrl+Alt+L)", null, delegate { ToggleLaser(); });
+            menu.Items.Add(new ToolStripMenuItem("Windows Rug v" + App.Version) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("اقفل السجادة", null, delegate { Quit(); });
-            tray = new NotifyIcon { Icon = Icon.FromHandle(bmp.GetHicon()), Text = "Windows Rug", ContextMenuStrip = menu, Visible = true };
+            tray = new NotifyIcon { Icon = Icon.FromHandle(bmp.GetHicon()), Text = "Windows Rug v" + App.Version, ContextMenuStrip = menu, Visible = true };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) RecallRugs(); };
         }
 
@@ -3282,6 +3321,8 @@ namespace WindowsRug
                 string kind = FurnitureForm.Kinds[i];
                 room.DropDownItems.Add(Toggle(FurnitureForm.Names[i], m.HasFurniture(kind), on => m.ToggleFurniture(kind)));
             }
+            room.DropDownItems.Add(new ToolStripSeparator());
+            room.DropDownItems.Add("رجّع الأوضة مكانها", null, delegate { m.ResetRoom(); });
             menu.Items.Add(room);
 
             menu.Items.Add(new ToolStripSeparator());

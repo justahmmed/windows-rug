@@ -7,11 +7,11 @@ $dst = Join-Path $env:LOCALAPPDATA 'WindowsRug'
 & (Join-Path $src 'Uninstall.ps1') -KeepFiles 2>$null
 
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
-foreach ($f in 'cat.png', 'items.png', 'robot.png', 'Uninstall.ps1', 'Uninstall.bat') {
-    Copy-Item (Join-Path $src $f) $dst -Force
-}
+# Everything in this folder (images, sub-folders, the uninstaller) goes along.
+Get-ChildItem $src | Where-Object { $_.Name -notin 'Install.ps1', 'Install.bat', 'Rug.cs' } |
+    ForEach-Object { Copy-Item $_.FullName $dst -Recurse -Force }
 foreach ($d in 'rugs', 'floors', 'furniture') {
-    Copy-Item (Join-Path $src $d) $dst -Recurse -Force
+    if (-not (Test-Path (Join-Path $dst $d))) { throw "Missing folder '$d' - extract the whole zip and run Install.bat from inside it." }
 }
 Get-ChildItem $dst -Recurse -File | Unblock-File
 
