@@ -1,6 +1,6 @@
 # Windows Rug
 
-**Hide desktop clutter under a rug.** Windows Rug puts a cloth-simulated Persian rug on your Windows desktop. You can drag it over messy icons, flip a corner back to reach what's underneath, and watch it drape and settle like real fabric.
+**Hide desktop clutter under a rug.** Windows Rug puts a cloth-simulated vintage Persian rug on your Windows desktop. You can drag it over messy icons, flip a corner back to reach what's underneath, and watch it drape and settle like real fabric.
 
 ![Windows Rug on a wood-floor desktop](docs/preview.jpg)
 
@@ -9,7 +9,7 @@
 ## Features
 
 - **Real cloth physics.** The rug is a mesh of about 750 particles. It has gravity, friction against the desk, and self-collision, so folds stack instead of passing through each other. Grab any point and the rug drags along behind your cursor. It wrinkles where it's pulled and settles when you let go.
-- **Folds that stay folded.** Pick up a corner, lay it over the rug, and it rests there with its shadow. The icons under it become reachable.
+- **Behaves like a real rug.** It's heavy and stiff rather than floppy: lift a corner and it curls over, let go and it flops back open, just like the real thing. However you leave it, it relaxes flat on the desk and never ends up as a tangled heap.
 - **Lit and shaded in real time.** A small software rasterizer draws the woven texture with per-vertex lighting. It also draws soft drop shadows, shadows cast by folded layers, and a duller underside.
 - **Lives on the desktop layer.** The rug sits above your icons and below every app window. It stays put when you press Win+D, and it doesn't show up in the taskbar or in Alt+Tab.
 - **Zero cost when idle.** The simulation runs only while the rug is moving. Once it settles, the timer stops, the process sits at 0% CPU, and its working set is trimmed.
@@ -17,7 +17,7 @@
 - **Remembers its shape.** Position, size and every fold are restored the next time you sign in.
 - **Wood-floor wallpaper included.** It's a calm, low-contrast plank texture, so the desktop stays easy on the eyes.
 
-| Drag it like fabric | Fold a corner back |
+| Drag it along | Lift a corner and let go |
 |---|---|
 | ![Dragging](docs/drag.jpg) | ![Folding](docs/fold.jpg) |
 
@@ -43,7 +43,7 @@ The installer:
 | Action | Result |
 |---|---|
 | Click and drag anywhere on the rug | Pulls the rug along like cloth |
-| Drag a corner over the rug | Folds it back so you can reach the icons underneath |
+| Lift a corner | Peek at the icons underneath; let go and the corner flops back down |
 | Double-click | Shakes the rug out and smoothly unfolds it flat, wherever it lies |
 | Right-click | **Bigger** · **Smaller** · **Rotate** · **Breeze** (an edge occasionally lifts on its own) · **Close** |
 
@@ -60,10 +60,10 @@ Double-click **`Uninstall.bat`**. This stops the rug, removes it from Startup, a
 
 | Part | Details |
 |---|---|
-| Physics | Verlet integration with position-based constraints: structural, shear and bend springs (10 solver iterations, 2 substeps per frame). Coulomb-style static and kinetic friction keeps the rug from sliding on its own. A spatial hash handles self-collision between non-neighbouring particles. Unfolding uses a best-fit (Procrustes) rotation of the flat layout and blends kinematically into it. |
+| Physics | Verlet integration with position-based constraints: structural, shear and bend springs (10 solver iterations, 2 substeps per frame). Coulomb-style static and kinetic friction grips the desk, while rug-on-rug contact is slick. Once released, a gentle best-fit pull toward the flat layout (the rug's "memory") lets folds flop back open. A spatial hash handles self-collision between non-neighbouring particles. Unfolding uses a best-fit (Procrustes) rotation of the flat layout and blends kinematically into it. |
 | Rendering | Textured triangle rasterization into a premultiplied BGRA buffer, with bilinear sampling and Gouraud lighting, and a per-pixel depth buffer so only the topmost layer shows. A half-resolution shadow map gives box-blurred soft shadows and layered self-shadowing. |
 | Window | A per-pixel-alpha layered window (`UpdateLayeredWindow`). Transparent pixels are click-through. The window is owned by `Progman` and pinned to the bottom of the Z-order with `WM_WINDOWPOSCHANGING`. |
-| Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. |
+| Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. A watchdog adds damping if the rug keeps moving and puts it to sleep within about 7 seconds of being let go, whatever its shape. |
 
 ## Project layout
 

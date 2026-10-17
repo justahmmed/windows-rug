@@ -11,142 +11,178 @@ from PIL import Image, ImageDraw, ImageFilter
 OUT = os.path.join(os.path.dirname(__file__), "..", "rug")
 rng = np.random.default_rng(7)
 
-RED = (128, 22, 26)
-DARK_RED = (88, 14, 18)
-NAVY = (24, 30, 58)
-CREAM = (226, 206, 168)
-GOLD = (196, 146, 70)
-TEAL = (40, 82, 88)
+# Vintage Persian palette: faded silver-grey field, navy accents, ivory highlights.
+IVORY = (222, 216, 204)
+SILVER = (182, 184, 188)
+GREY = (138, 142, 150)
+SLATE = (102, 108, 120)
+NAVY = (38, 48, 72)
+BLUSH = (196, 170, 160)
+FRINGE = (232, 226, 210)
 
 
 def lerp(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
+def petal(d, cx, cy, ang, length, width, col):
+    pts = []
+    for k in range(13):
+        t = k / 12
+        r = length * t
+        w = width * math.sin(math.pi * t)
+        pts.append((r, w))
+    pts += [(r, -w) for r, w in reversed(pts)]
+    ca, sa = math.cos(ang), math.sin(ang)
+    d.polygon([(cx + x * ca - y * sa, cy + x * sa + y * ca) for x, y in pts], fill=col)
+
+
+def rosette(d, cx, cy, r, petals, col, centre, inner=None):
+    for k in range(petals):
+        petal(d, cx, cy, k * 2 * math.pi / petals, r, r * 0.32, col)
+    if inner:
+        for k in range(petals):
+            petal(d, cx, cy, (k + 0.5) * 2 * math.pi / petals, r * 0.6, r * 0.2, inner)
+    d.ellipse([cx - r * 0.28, cy - r * 0.28, cx + r * 0.28, cy + r * 0.28], fill=centre)
+
+
+def vine(d, x0, y0, x1, y1, bend, col, width, leaves, rnd):
+    pts = []
+    for k in range(25):
+        t = k / 24
+        x = x0 + (x1 - x0) * t + math.sin(t * math.pi) * bend * (y1 - y0) / 100
+        y = y0 + (y1 - y0) * t - math.sin(t * math.pi) * bend * (x1 - x0) / 100
+        pts.append((x, y))
+    d.line(pts, fill=col, width=width)
+    for k in range(2, 24, max(2, 24 // max(1, leaves))):
+        (xa, ya), (xb, yb) = pts[k], pts[k + 1]
+        ang = math.atan2(yb - ya, xb - xa) + (1 if k % 4 else -1) * 0.9
+        petal(d, xa, ya, ang, width * 5, width * 1.6, col)
+
+
 def make_rug(W=960, H=640):
-    img = Image.new("RGB", (W, H), RED)
+    S = 2                                   # draw at 2x, then downsample
+    w, h = W * S, H * S
+    img = Image.new("RGB", (w, h), GREY)
     d = ImageDraw.Draw(img)
+    rnd = np.random.default_rng(11)
 
-    # Borders: outer guard, main border, inner guard
-    bands = [
-        (0, DARK_RED), (10, CREAM), (16, NAVY), (64, CREAM), (70, DARK_RED),
-        (76, GOLD), (80, RED),
-    ]
+    # Borders, outside in.
+    bands = [(0, SLATE), (8, IVORY), (22, SILVER), (118, IVORY), (128, SLATE), (140, IVORY), (148, GREY)]
     for inset, col in bands:
-        d.rectangle([inset, inset, W - 1 - inset, H - 1 - inset], fill=col)
+        d.rectangle([inset, inset, w - 1 - inset, h - 1 - inset], fill=col)
 
-    # Main border motifs (navy band between 16 and 64)
-    def motif(cx, cy, r):
-        d.polygon([(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)], fill=RED)
-        d.polygon([(cx, cy - r * .6), (cx + r * .6, cy), (cx, cy + r * .6), (cx - r * .6, cy)], fill=CREAM)
-        d.ellipse([cx - r * .25, cy - r * .25, cx + r * .25, cy + r * .25], fill=TEAL)
-        for a in range(4):
-            ang = a * math.pi / 2 + math.pi / 4
-            px, py = cx + math.cos(ang) * r * .85, cy + math.sin(ang) * r * .85
-            d.ellipse([px - 3, py - 3, px + 3, py + 3], fill=GOLD)
+    # Main border: a row of faded rosette discs on silver, linked by little vines.
+    step = 104
+    for edge in range(4):
+        horiz = edge < 2
+        length = w if horiz else h
+        for k in range(int(70), length - 60, step):
+            if horiz:
+                cx, cy = k, 70 if edge == 0 else h - 71
+            else:
+                cx, cy = 70 if edge == 2 else w - 71, k
+            if not horiz and (k < 120 or k > h - 120):
+                continue
+            d.ellipse([cx - 40, cy - 40, cx + 40, cy + 40], fill=GREY)
+            rosette(d, cx, cy, 34, 8, SILVER, SLATE, inner=IVORY)
+            if horiz:
+                vine(d, cx + 40, cy, cx + step - 40, cy, 25, SLATE, 3, 3, rnd)
+            else:
+                vine(d, cx, cy + 40, cx, cy + step - 40, 25, SLATE, 3, 3, rnd)
 
-    step = 48
-    for x in range(40, W - 30, step):
-        motif(x, 40, 17)
-        motif(x, H - 41, 17)
-    for y in range(40 + step, H - 60, step):
-        motif(40, y, 17)
-        motif(W - 41, y, 17)
+    # Field: scattered flowers and vines, low contrast like a worn rug.
+    fx0, fy0, fx1, fy1 = 150, 150, w - 151, h - 151
+    for _ in range(650):
+        x0, y0 = rnd.uniform(fx0, fx1), rnd.uniform(fy0, fy1)
+        ang = rnd.uniform(0, 2 * math.pi)
+        L = rnd.uniform(40, 120)
+        vine(d, x0, y0, x0 + math.cos(ang) * L, y0 + math.sin(ang) * L, rnd.uniform(-40, 40),
+             lerp(GREY, SILVER, rnd.uniform(0.15, 0.55)), 2, 4, rnd)
+    for _ in range(700):
+        x, y = rnd.uniform(fx0 + 10, fx1 - 10), rnd.uniform(fy0 + 10, fy1 - 10)
+        r = rnd.uniform(6, 16)
+        rosette(d, x, y, r, int(rnd.integers(5, 9)), lerp(GREY, IVORY, rnd.uniform(0.25, 0.7)),
+                lerp(GREY, SLATE, rnd.uniform(0.3, 1)))
 
-    # Small zig-zag in the cream guards
-    for x in range(10, W - 10, 8):
-        d.line([(x, 13), (x + 4, 11)], fill=RED, width=1)
-        d.line([(x, H - 14), (x + 4, H - 12)], fill=RED, width=1)
+    # Corner spandrels: navy quarter-medallions with ivory filigree.
+    cw, ch = 440, 300
+    for sx in (0, 1):
+        for sy in (0, 1):
+            ox = fx0 if sx == 0 else fx1
+            oy = fy0 if sy == 0 else fy1
+            box = [ox - cw, oy - ch, ox + cw, oy + ch]
+            corner = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(corner).ellipse(box, fill=255)
+            field = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(field).rectangle([fx0, fy0, fx1, fy1], fill=255)
+            mask = Image.fromarray(np.minimum(np.asarray(corner), np.asarray(field)))
+            layer = Image.new("RGB", (w, h), NAVY)
+            ld = ImageDraw.Draw(layer)
+            dx, dy = (1 if sx == 0 else -1), (1 if sy == 0 else -1)
+            for _ in range(180):
+                rr = rnd.uniform(0.15, 0.95)
+                ang = rnd.uniform(0, math.pi / 2)
+                x = ox + dx * math.cos(ang) * cw * rr
+                y = oy + dy * math.sin(ang) * ch * rr
+                vine(ld, x, y, x + dx * rnd.uniform(-50, 50), y + dy * rnd.uniform(-50, 50), 30,
+                     lerp(NAVY, SILVER, rnd.uniform(0.35, 0.6)), 2, 3, rnd)
+            for _ in range(70):
+                rr = rnd.uniform(0.2, 0.9)
+                ang = rnd.uniform(0, math.pi / 2)
+                rosette(ld, ox + dx * math.cos(ang) * cw * rr, oy + dy * math.sin(ang) * ch * rr,
+                        rnd.uniform(6, 14), 6, lerp(NAVY, IVORY, rnd.uniform(0.5, 0.75)), NAVY)
+            ld.ellipse(box, outline=IVORY, width=5)
+            img.paste(layer, (0, 0), mask)
+    d = ImageDraw.Draw(img)
+    d.rectangle([fx0, fy0, fx1, fy1], outline=IVORY, width=4)
 
-    # Field: dense small floral pattern
-    fx0, fy0, fx1, fy1 = 82, 82, W - 83, H - 83
-    for y in range(fy0 + 14, fy1 - 6, 28):
-        off = 14 if (y // 28) % 2 else 0
-        for x in range(fx0 + 14 + off, fx1 - 6, 28):
-            c = lerp(DARK_RED, NAVY, 0.4)
-            d.polygon([(x, y - 6), (x + 6, y), (x, y + 6), (x - 6, y)], fill=c)
-            d.ellipse([x - 2, y - 2, x + 2, y + 2], fill=GOLD)
+    # Central medallion: concentric rings of petals.
+    cx, cy = w / 2, h / 2
+    d.ellipse([cx - 300, cy - 300, cx + 300, cy + 300], fill=lerp(GREY, SILVER, 0.4))
+    d.ellipse([cx - 270, cy - 270, cx + 270, cy + 270], fill=IVORY)
+    for ring, n, rr, col in [(240, 40, 34, SILVER), (190, 32, 30, lerp(SILVER, IVORY, 0.4)), (140, 24, 26, GREY)]:
+        for k in range(n):
+            a = k * 2 * math.pi / n
+            rosette(d, cx + math.cos(a) * ring, cy + math.sin(a) * ring, rr * 0.55, 6, col, SLATE)
+    d.ellipse([cx - 110, cy - 110, cx + 110, cy + 110], fill=lerp(GREY, SLATE, 0.3))
+    rosette(d, cx, cy, 95, 12, SILVER, BLUSH, inner=IVORY)
+    rosette(d, cx, cy, 40, 8, BLUSH, NAVY)
+    # Pendant ovals on the long axis.
+    for sg in (-1, 1):
+        px = cx + sg * 420
+        d.ellipse([px - 70, cy - 42, px + 70, cy + 42], fill=NAVY)
+        rosette(d, px, cy, 34, 8, lerp(NAVY, IVORY, 0.7), BLUSH)
 
-    # Corner spandrels
-    cw, ch = 210, 150
-    for (sx, sy) in [(0, 0), (1, 0), (0, 1), (1, 1)]:
-        ox = fx0 if sx == 0 else fx1
-        oy = fy0 if sy == 0 else fy1
-        dx = 1 if sx == 0 else -1
-        dy = 1 if sy == 0 else -1
-        pts = [(ox, oy), (ox + dx * cw, oy), (ox + dx * cw * .55, oy + dy * ch * .45),
-               (ox + dx * cw * .3, oy + dy * ch * .55), (ox, oy + dy * ch)]
-        d.polygon(pts, fill=NAVY)
-        inner = [(ox + dx * 10, oy + dy * 10), (ox + dx * (cw - 40), oy + dy * 10),
-                 (ox + dx * cw * .48, oy + dy * ch * .38), (ox + dx * 10, oy + dy * (ch - 30))]
-        d.line(inner + [inner[0]], fill=GOLD, width=2)
-        for i in range(5):
-            px = ox + dx * (30 + i * 28)
-            py = oy + dy * (22 + (i % 2) * 14)
-            d.ellipse([px - 5, py - 5, px + 5, py + 5], fill=CREAM)
-            d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=RED)
+    img = img.resize((W, H), Image.LANCZOS)
 
-    # Central medallion: layered lobed diamonds
-    cx, cy = W / 2, H / 2
-
-    def lobed(rx, ry, lobes, amp, col):
-        pts = []
-        for i in range(360):
-            t = i / 360 * 2 * math.pi
-            # diamond base shape blended with a circle, plus lobes
-            base = 1 / (abs(math.cos(t)) + abs(math.sin(t))) ** 0.75
-            r = base * (1 + amp * math.cos(lobes * t))
-            pts.append((cx + math.cos(t) * rx * r, cy + math.sin(t) * ry * r))
-        d.polygon(pts, fill=col)
-
-    lobed(250, 175, 16, .06, NAVY)
-    lobed(228, 158, 16, .06, GOLD)
-    lobed(220, 152, 16, .06, DARK_RED)
-    lobed(160, 112, 12, .08, NAVY)
-    lobed(120, 84, 8, .1, CREAM)
-    lobed(96, 66, 8, .1, RED)
-    lobed(52, 36, 4, .12, NAVY)
-    d.ellipse([cx - 14, cy - 14, cx + 14, cy + 14], fill=GOLD)
-    d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=RED)
-    # Pendants on the long axis
-    for sgn in (-1, 1):
-        px = cx + sgn * 300
-        d.polygon([(px, cy - 34), (px + sgn * 46, cy), (px, cy + 34), (px - sgn * 30, cy)], fill=NAVY)
-        d.polygon([(px, cy - 16), (px + sgn * 22, cy), (px, cy + 16), (px - sgn * 14, cy)], fill=CREAM)
-    # Dots ring
-    for i in range(32):
-        t = i / 32 * 2 * math.pi
-        x, y = cx + math.cos(t) * 190, cy + math.sin(t) * 132
-        d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=CREAM)
-    for i in range(16):
-        t = i / 16 * 2 * math.pi
-        x, y = cx + math.cos(t) * 138, cy + math.sin(t) * 96
-        d.ellipse([x - 5, y - 5, x + 5, y + 5], fill=RED)
-        d.ellipse([x - 2, y - 2, x + 2, y + 2], fill=GOLD)
-
-    # Wool texture: per-pixel noise + slight knot grid + worn vignette
+    # Age: faded patches toward the warp colour, slight colour wobble (abrash), wool grain.
     a = np.asarray(img).astype(np.float32)
-    noise = rng.normal(0, 9, (H, W, 1))
-    knots = (np.sin(np.arange(W) * 1.9)[None, :, None] * np.sin(np.arange(H) * 1.9)[:, None, None]) * 4
+    wear = fbm(H, W, 32, 4, rnd)
+    wear = np.clip((wear + 0.1) * 2.5, 0, 1)[..., None] * 0.28
+    a = a * (1 - wear) + np.array(IVORY, np.float32) * wear
+    abrash = fbm_long(H, W, 40, 3, rnd, stretch=6)[..., None] * np.array([6, 5, 9])
+    a += abrash
+    a += rnd.normal(0, 7, (H, W, 1))
     yy, xx = np.mgrid[0:H, 0:W]
-    vign = 1 - 0.18 * (((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
-    a = (a + noise + knots) * vign[..., None]
-    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
-    img = img.filter(ImageFilter.GaussianBlur(0.6))
+    a *= (1 + np.sin(xx * 2.2) * np.sin(yy * 2.2) * 0.025)[..., None]
+    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.45))
 
-    # Fringe on the short ends
-    F = 26
+    # Fringe on the short ends.
+    F = 28
     out = Image.new("RGBA", (W + 2 * F, H), (0, 0, 0, 0))
     out.paste(img, (F, 0))
     fd = ImageDraw.Draw(out)
-    for y in range(4, H - 4, 5):
+    r = np.random.default_rng(5)
+    for y in range(3, H - 3, 4):
         for side in (0, 1):
             x0 = F if side == 0 else F + W - 1
-            length = F - 2 - int(rng.integers(0, 6))
+            length = F - 2 - int(r.integers(0, 7))
             x1 = x0 - length if side == 0 else x0 + length
-            wob = int(rng.integers(-2, 3))
-            shade = int(rng.integers(205, 240))
-            fd.line([(x0, y), (x1, y + wob)], fill=(shade, shade - 12, shade - 40, 255), width=2)
+            wob = int(r.integers(-2, 3))
+            sh = int(r.integers(-14, 6))
+            col = tuple(int(c) + sh for c in FRINGE) + (255,)
+            fd.line([(x0, y), (x1, y + wob)], fill=col, width=2)
     return out
 
 

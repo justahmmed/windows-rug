@@ -1,24 +1,19 @@
-## Windows Rug v1.0.0
+## Windows Rug v1.1.0
 
-The first release of Windows Rug: a cloth-simulated Persian rug for your Windows desktop. Drag it over cluttered icons, fold a corner back to reach what's underneath, and watch it settle like real fabric.
+A heavier, more realistic rug with a brand-new vintage look.
 
 ![Windows Rug](https://raw.githubusercontent.com/justahmmed/windows-rug/main/docs/preview.jpg)
 
-### Highlights
+### What's new
 
-- **Real cloth physics.** About 750 particles with gravity, desk friction and self-collision. The rug drags behind your cursor, wrinkles under tension, and keeps its folds.
-- **Double-click to shake it out.** However crumpled the rug is, it lifts, slides apart and lands flat again.
-- **Real-time lighting and soft shadows.** The rug has a shaded woven texture, drop shadows, shadows cast by folded layers, and a duller underside.
-- **Desktop layer.** It sits above your icons and below every app window. It survives Win+D and stays out of the taskbar and Alt+Tab.
-- **0% CPU when idle.** The simulation sleeps once the rug settles.
-- **No third-party runtime.** The installer compiles a small native exe with the C# compiler built into Windows.
-- **Persistent.** Position, size and folds are restored at sign-in.
-- **Wood-floor wallpaper included.** It's calm and low contrast.
+- **Behaves like a real rug.** The rug is now heavy and stiff instead of floppy. Lift a corner and it curls over; let go and it flops back open. However you leave it, it relaxes flat and never ends up as a tangled ball.
+- **No more lag when crumpled.** Folded layers could push each other upward without limit. That's fixed, point speed and height are now capped, and a watchdog puts the rug to sleep within seconds of being let go, so the CPU drops back to 0%.
+- **New vintage design.** A faded silver-grey Persian with a round medallion, navy floral corners, a rosette border and cream fringe.
 
 ### Install
 
 1. Download **WindowsRug.zip** below and extract it.
-2. Double-click **Install.bat**.
+2. Double-click **Install.bat**. It replaces any older version.
 
 To remove it, double-click **Uninstall.bat**.
 

@@ -62,7 +62,7 @@ namespace WindowsRug
     {
         public readonly int NX, NY, N;
         public readonly float[] X, Y, Z, PX, PY, PZ;
-        readonly bool[] supported;
+        readonly bool[] supported, onLayer;   // resting on something / resting on the rug itself
         readonly int[] ca, cb;
         readonly float[] cr, ck;
         public readonly float Thickness, Spacing;
@@ -76,6 +76,14 @@ namespace WindowsRug
         public float UnfoldT = -1;          // 0..1 while unfolding, -1 otherwise
         public bool Unfolding { get { return UnfoldT >= 0; } }
         public float GrabX, GrabY, GrabZ, GrabLift;
+        public float Memory;                // 0..1 pull back towards lying flat
+        public float Settling;              // 0..1 extra damping used to make the rug come to rest
+        float MaxHeight { get { return Spacing * 6; } }
+
+        public static int[,] Links = { { 1, 0 }, { 0, 1 }, { 1, 1 }, { 1, -1 }, { 2, 0 }, { 0, 2 }, { 2, 2 }, { 2, -2 } };
+        public static float[] Stiff = { 1f, 1f, 0.3f, 0.3f, 0.4f, 0.4f, 0f, 0f };
+
+        public static float LayerGrip = 0.9f;
 
         const float Gravity = 0.32f;
         const int Iterations = 10;
@@ -85,7 +93,7 @@ namespace WindowsRug
             NX = nx; NY = ny; N = nx * ny;
             X = new float[N]; Y = new float[N]; Z = new float[N];
             PX = new float[N]; PY = new float[N]; PZ = new float[N];
-            supported = new bool[N];
+            supported = new bool[N]; onLayer = new bool[N];
             float dx = w / (nx - 1), dy = h / (ny - 1);
             Spacing = Math.Min(dx, dy);
             Thickness = Math.Max(2f, Spacing * 0.22f);
@@ -105,11 +113,11 @@ namespace WindowsRug
             var a = new List<int>(); var b = new List<int>(); var s = new List<float>();
             // Structural, shear and bend springs. Position-based stiffness compounds over
             // the solver iterations, so the small bend values still give a soft drape.
-            int[,] links = { { 1, 0 }, { 0, 1 }, { 1, 1 }, { 1, -1 }, { 2, 0 }, { 0, 2 } };
-            float[] stiff = { 1f, 1f, 0.02f, 0.02f, 0.01f, 0.01f };
+            int[,] links = Links;
+            float[] stiff = Stiff;
             for (int j = 0; j < ny; j++)
                 for (int i = 0; i < nx; i++)
-                    for (int l = 0; l < 6; l++)
+                    for (int l = 0; l < stiff.Length; l++)
                     {
                         int i2 = i + links[l, 0], j2 = j + links[l, 1];
                         if (i2 < 0 || i2 >= nx || j2 < 0 || j2 >= ny) continue;
@@ -127,11 +135,10 @@ namespace WindowsRug
         public float CenterX { get { float s = 0; for (int i = 0; i < N; i++) s += X[i]; return s / N; } }
         public float CenterY { get { float s = 0; for (int i = 0; i < N; i++) s += Y[i]; return s / N; } }
 
-        public void BeginUnfold()
+        // Best-fit placement (centre and rotation) of the flat layout onto the current shape.
+        void FitFlat(out float cx, out float cy, out float cos, out float sin)
         {
-            Grab = -1;
-            float cx = CenterX, cy = CenterY;
-            // Best-fit rotation of the flat layout onto the current shape.
+            cx = CenterX; cy = CenterY;
             double sc = 0, ss = 0;
             for (int i = 0; i < N; i++)
             {
@@ -140,8 +147,27 @@ namespace WindowsRug
                 ss += RX[i] * py - RY[i] * px;
             }
             double ang = Math.Atan2(ss, sc);
-            toCos = (float)Math.Cos(ang); toSin = (float)Math.Sin(ang);
-            toCX = cx; toCY = cy;
+            cos = (float)Math.Cos(ang); sin = (float)Math.Sin(ang);
+        }
+
+        // A real rug "wants" to lie flat: once let go, folds flop back open and
+        // heaps spread out, while it stays where it was dropped.
+        void RelaxToFlat(float k)
+        {
+            float cx, cy, cos, sin;
+            FitFlat(out cx, out cy, out cos, out sin);
+            for (int i = 0; i < N; i++)
+            {
+                float tx = cx + RX[i] * cos - RY[i] * sin, ty = cy + RX[i] * sin + RY[i] * cos;
+                X[i] += (tx - X[i]) * k;
+                Y[i] += (ty - Y[i]) * k;
+            }
+        }
+
+        public void BeginUnfold()
+        {
+            Grab = -1;
+            FitFlat(out toCX, out toCY, out toCos, out toSin);
             fromX = (float[])X.Clone(); fromY = (float[])Y.Clone(); fromZ = (float[])Z.Clone();
             UnfoldT = 0;
         }
@@ -180,14 +206,23 @@ namespace WindowsRug
             for (int i = 0; i < N; i++)
             {
                 float vx = X[i] - PX[i], vy = Y[i] - PY[i], vz = Z[i] - PZ[i];
-                if (supported[i])
+                if (onLayer[i])
                 {
-                    // Friction against the desk (or the rug underneath).
+                    // Pile sliding on pile: much slicker than rug on the desk.
+                    vx *= LayerGrip; vy *= LayerGrip;
+                }
+                else if (supported[i])
+                {
+                    // Friction against the desk.
                     vx *= 0.55f; vy *= 0.55f;
                     if (vx * vx + vy * vy < 0.0009f) { vx = 0; vy = 0; }
                 }
                 else { vx *= 0.993f; vy *= 0.993f; }
                 vz *= 0.985f;
+                if (Settling > 0) { float k = 1 - Settling; vx *= k; vy *= k; vz *= k; }
+                // Never let a point jump more than half a cell in one step.
+                float v2 = vx * vx + vy * vy + vz * vz, vmax = Spacing * 0.5f;
+                if (v2 > vmax * vmax) { float k = vmax / (float)Math.Sqrt(v2); vx *= k; vy *= k; vz *= k; }
                 PX[i] = X[i]; PY[i] = Y[i]; PZ[i] = Z[i];
                 X[i] += vx; Y[i] += vy; Z[i] += vz - Gravity;
             }
@@ -220,6 +255,7 @@ namespace WindowsRug
             ClampFloor(true);
             SelfCollide();
             Friction();
+            if (Memory > 0 && Grab < 0) RelaxToFlat(Memory);
 
             float maxMove = 0;
             for (int i = 0; i < N; i++)
@@ -238,7 +274,7 @@ namespace WindowsRug
             const float staticLimit = 0.015f, kinetic = 0.02f;
             for (int i = 0; i < N; i++)
             {
-                if (!supported[i] || i == Grab) continue;
+                if (!supported[i] || onLayer[i] || i == Grab) continue;
                 float dx = X[i] - PX[i], dy = Y[i] - PY[i];
                 float d = (float)Math.Sqrt(dx * dx + dy * dy);
                 if (d < staticLimit) { X[i] = PX[i]; Y[i] = PY[i]; }
@@ -250,7 +286,8 @@ namespace WindowsRug
         {
             for (int i = 0; i < N; i++)
             {
-                if (final) supported[i] = false;
+                if (final) { supported[i] = false; onLayer[i] = false; }
+                if (Z[i] > MaxHeight) Z[i] = MaxHeight;
                 if (Z[i] <= 0)
                 {
                     Z[i] = 0;
@@ -270,11 +307,13 @@ namespace WindowsRug
                 if (X[i] < minX) minX = X[i]; if (X[i] > maxX) maxX = X[i];
                 if (Y[i] < minY) minY = Y[i]; if (Y[i] > maxY) maxY = Y[i];
             }
-            int gw = (int)((maxX - minX) / cell) + 1, gh = (int)((maxY - minY) / cell) + 1;
+            int gw = Math.Min(4096, (int)((maxX - minX) / cell) + 1), gh = Math.Min(4096, (int)((maxY - minY) / cell) + 1);
+            cell = Math.Max(cell, Math.Max((maxX - minX) / (gw - 0.5f), (maxY - minY) / (gh - 0.5f)));
             int cells = gw * gh;
             if (cellStart == null || cellStart.Length < cells + 1) { cellStart = new int[cells + 1]; cellFill = new int[cells + 1]; }
             else { Array.Clear(cellStart, 0, cells + 1); Array.Clear(cellFill, 0, cells + 1); }
-            if (cellItems == null) { cellItems = new int[N]; cellOf = new int[N]; }
+            if (cellItems == null) { cellItems = new int[N]; cellOf = new int[N]; lift = new float[N]; }
+            Array.Clear(lift, 0, N);
             for (int i = 0; i < N; i++)
             {
                 int c = (int)((Y[i] - minY) / cell) * gw + (int)((X[i] - minX) / cell);
@@ -310,14 +349,24 @@ namespace WindowsRug
                             bool jUp = PZ[j] != PZ[i] ? PZ[j] > PZ[i] : Z[j] >= Z[i];
                             int up = jUp ? j : i, down = jUp ? i : j;
                             if (up == Grab) continue;
-                            Z[up] = Z[down] + Thickness;
-                            if (PZ[up] < Z[up] - 0.5f) PZ[up] = Z[up];
-                            supported[up] = true;
+                            // Collected and applied afterwards from this step's heights, so
+                            // stacks can't ratchet themselves upwards within one pass.
+                            float need = Math.Min(Z[down] + Thickness - Z[up], Thickness * 0.5f);
+                            if (need > lift[up]) lift[up] = need;
+                            supported[up] = true; onLayer[up] = true;
                         }
                     }
                 }
             }
+            for (int i = 0; i < N; i++)
+            {
+                if (lift[i] <= 0) continue;
+                Z[i] += lift[i];
+                if (PZ[i] < Z[i] - 0.5f) PZ[i] = Z[i];
+            }
         }
+
+        float[] lift;
 
         // A puff of air lifting one edge.
         public void Gust(Random rnd)
@@ -672,7 +721,7 @@ namespace WindowsRug
         readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer breezeTimer = new System.Windows.Forms.Timer();
         readonly Random rnd = new Random();
-        int calmFrames;
+        int calmFrames, restlessFrames;
         float grabOffX, grabOffY, mouseVX, mouseVY;
         Point lastMouse;
 
@@ -770,20 +819,28 @@ namespace WindowsRug
         }
 
         // ---- Simulation loop (runs only while something moves) ----
-        void Wake() { calmFrames = 0; if (!tick.Enabled) tick.Start(); }
+        void Wake() { calmFrames = 0; restlessFrames = 0; cloth.Settling = 0; if (!tick.Enabled) tick.Start(); }
 
         void Frame()
         {
+            // Let go: the rug's stiffness lets folds flop back open.
+            cloth.Memory = cloth.Grab < 0 && !cloth.Unfolding ? 0.005f : 0;
             float moved = Math.Max(cloth.Step(), cloth.Step());
             Render();
-            if (cloth.Grab < 0 && !cloth.Unfolding && moved < 0.025f) calmFrames++;
+            bool free = cloth.Grab < 0 && !cloth.Unfolding;
+            if (free && moved < 0.025f) calmFrames++;
             else calmFrames = 0;
-            if (calmFrames > 40) Sleep();
+            // Watchdog: a rug that keeps fidgeting is damped down and put to sleep,
+            // so a tangled heap can never keep the CPU busy.
+            restlessFrames = free ? restlessFrames + 1 : 0;
+            cloth.Settling = Math.Max(0, Math.Min(0.9f, (restlessFrames - 180) / 150f));
+            if (calmFrames > 40 || restlessFrames > 420) Sleep();
         }
 
         void Sleep()
         {
             tick.Stop();
+            cloth.Settling = 0;
             for (int i = 0; i < cloth.N; i++)
             {
                 cloth.PX[i] = cloth.X[i]; cloth.PY[i] = cloth.Y[i]; cloth.PZ[i] = cloth.Z[i];
