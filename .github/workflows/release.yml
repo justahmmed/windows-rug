@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile check
+        shell: powershell
+        run: |
+          Add-Type -TypeDefinition ([IO.File]::ReadAllText("$PWD\rug\Rug.cs", [Text.Encoding]::UTF8)) `
+            -ReferencedAssemblies System.Windows.Forms, System.Drawing `
+            -OutputAssembly "$env:RUNNER_TEMP\WindowsRug.exe" -OutputType WindowsApplication
+
+      - name: Package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist\WindowsRug | Out-Null
+          Copy-Item rug\* dist\WindowsRug\
+          Copy-Item README.md, LICENSE dist\WindowsRug\
+          Compress-Archive -Path dist\WindowsRug -DestinationPath dist\WindowsRug.zip
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Windows Rug ${{ github.ref_name }}
+          body_path: .github/release-notes.md
+          files: dist/WindowsRug.zip
