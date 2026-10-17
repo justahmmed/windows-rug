@@ -3,6 +3,11 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release, e.g. v1.0.0'
+        required: true
 
 permissions:
   contents: write
@@ -30,6 +35,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: Windows Rug ${{ github.ref_name }}
+          tag_name: ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Windows Rug ${{ inputs.version || github.ref_name }}
           body_path: .github/release-notes.md
           files: dist/WindowsRug.zip
