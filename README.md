@@ -21,6 +21,10 @@
 |---|---|
 | ![Dragging](docs/drag.jpg) | ![Folding](docs/fold.jpg) |
 
+**Double-click to shake it out:** however crumpled the rug is, it lifts, slides apart and lands flat again.
+
+![Unfolding](docs/unfold.jpg)
+
 ## Install
 
 1. Download `WindowsRug.zip` from the [latest release](../../releases/latest) and extract it.
@@ -40,7 +44,8 @@ The installer:
 |---|---|
 | Click and drag anywhere on the rug | Pulls the rug along like cloth |
 | Drag a corner over the rug | Folds it back so you can reach the icons underneath |
-| Right-click | **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Breeze** (an edge occasionally lifts on its own) · **Close** |
+| Double-click | Shakes the rug out and smoothly unfolds it flat, wherever it lies |
+| Right-click | **Bigger** · **Smaller** · **Rotate** · **Breeze** (an edge occasionally lifts on its own) · **Close** |
 
 ## Uninstall
 
@@ -55,8 +60,8 @@ Double-click **`Uninstall.bat`**. This stops the rug, removes it from Startup, a
 
 | Part | Details |
 |---|---|
-| Physics | Verlet integration with position-based constraints: structural, shear and bend springs (10 solver iterations, 2 substeps per frame). Coulomb-style static and kinetic friction keeps the rug from sliding on its own. A spatial hash handles self-collision between non-neighbouring particles. |
-| Rendering | Textured triangle rasterization into a premultiplied BGRA buffer, with bilinear sampling and Gouraud lighting. A half-resolution shadow map gives box-blurred soft shadows and layered self-shadowing. |
+| Physics | Verlet integration with position-based constraints: structural, shear and bend springs (10 solver iterations, 2 substeps per frame). Coulomb-style static and kinetic friction keeps the rug from sliding on its own. A spatial hash handles self-collision between non-neighbouring particles. Unfolding uses a best-fit (Procrustes) rotation of the flat layout and blends kinematically into it. |
+| Rendering | Textured triangle rasterization into a premultiplied BGRA buffer, with bilinear sampling and Gouraud lighting, and a per-pixel depth buffer so only the topmost layer shows. A half-resolution shadow map gives box-blurred soft shadows and layered self-shadowing. |
 | Window | A per-pixel-alpha layered window (`UpdateLayeredWindow`). Transparent pixels are click-through. The window is owned by `Progman` and pinned to the bottom of the Z-order with `WM_WINDOWPOSCHANGING`. |
 | Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. |
 

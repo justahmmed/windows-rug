@@ -68,6 +68,13 @@ namespace WindowsRug
         public readonly float Thickness, Spacing;
 
         public int Grab = -1;
+
+        // Smooth "shake it out" unfold: points glide to the flat layout.
+        readonly float[] RX, RY;           // flat layout, centred on the origin
+        float[] fromX, fromY, fromZ;
+        float toCX, toCY, toCos, toSin;
+        public float UnfoldT = -1;          // 0..1 while unfolding, -1 otherwise
+        public bool Unfolding { get { return UnfoldT >= 0; } }
         public float GrabX, GrabY, GrabZ, GrabLift;
 
         const float Gravity = 0.32f;
@@ -81,7 +88,7 @@ namespace WindowsRug
             supported = new bool[N];
             float dx = w / (nx - 1), dy = h / (ny - 1);
             Spacing = Math.Min(dx, dy);
-            Thickness = Math.Max(1.5f, Spacing * 0.14f);
+            Thickness = Math.Max(2f, Spacing * 0.22f);
             for (int j = 0; j < ny; j++)
                 for (int i = 0; i < nx; i++)
                 {
@@ -90,6 +97,10 @@ namespace WindowsRug
                     Y[k] = PY[k] = top + j * dy;
                     supported[k] = true;
                 }
+
+            RX = new float[N]; RY = new float[N];
+            float mx0 = left + w / 2, my0 = top + h / 2;
+            for (int k = 0; k < N; k++) { RX[k] = X[k] - mx0; RY[k] = Y[k] - my0; }
 
             var a = new List<int>(); var b = new List<int>(); var s = new List<float>();
             // Structural, shear and bend springs. Position-based stiffness compounds over
@@ -116,9 +127,56 @@ namespace WindowsRug
         public float CenterX { get { float s = 0; for (int i = 0; i < N; i++) s += X[i]; return s / N; } }
         public float CenterY { get { float s = 0; for (int i = 0; i < N; i++) s += Y[i]; return s / N; } }
 
+        public void BeginUnfold()
+        {
+            Grab = -1;
+            float cx = CenterX, cy = CenterY;
+            // Best-fit rotation of the flat layout onto the current shape.
+            double sc = 0, ss = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float px = X[i] - cx, py = Y[i] - cy;
+                sc += RX[i] * px + RY[i] * py;
+                ss += RX[i] * py - RY[i] * px;
+            }
+            double ang = Math.Atan2(ss, sc);
+            toCos = (float)Math.Cos(ang); toSin = (float)Math.Sin(ang);
+            toCX = cx; toCY = cy;
+            fromX = (float[])X.Clone(); fromY = (float[])Y.Clone(); fromZ = (float[])Z.Clone();
+            UnfoldT = 0;
+        }
+
+        public void CancelUnfold()
+        {
+            if (!Unfolding) return;
+            UnfoldT = -1;
+            for (int i = 0; i < N; i++) { PX[i] = X[i]; PY[i] = Y[i]; PZ[i] = Z[i]; }
+        }
+
+        float UnfoldStep()
+        {
+            UnfoldT = Math.Min(1, UnfoldT + 1 / 80f);
+            float t = UnfoldT, e = t * t * (3 - 2 * t);
+            float lift = (float)Math.Sin(Math.PI * t) * Spacing * 0.9f;  // lifted so layers slide apart
+            float maxMove = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float tx = toCX + RX[i] * toCos - RY[i] * toSin, ty = toCY + RX[i] * toSin + RY[i] * toCos;
+                float nx = fromX[i] + (tx - fromX[i]) * e, ny = fromY[i] + (ty - fromY[i]) * e;
+                float nz = fromZ[i] * (1 - e) + lift;
+                float m = Math.Abs(nx - X[i]) + Math.Abs(ny - Y[i]) + Math.Abs(nz - Z[i]);
+                if (m > maxMove) maxMove = m;
+                X[i] = PX[i] = nx; Y[i] = PY[i] = ny; Z[i] = PZ[i] = nz;
+                supported[i] = nz <= 0.01f;
+            }
+            if (t >= 1) UnfoldT = -1;
+            return Math.Max(maxMove, 1);
+        }
+
         // One simulation step. Returns the largest distance any point moved.
         public float Step()
         {
+            if (Unfolding) return UnfoldStep();
             for (int i = 0; i < N; i++)
             {
                 float vx = X[i] - PX[i], vy = Y[i] - PY[i], vz = Z[i] - PZ[i];
@@ -226,7 +284,7 @@ namespace WindowsRug
             for (int c = 0; c < cells; c++) cellStart[c + 1] += cellStart[c];
             for (int i = 0; i < N; i++) { int c = cellOf[i]; cellItems[cellStart[c] + cellFill[c]++] = i; }
 
-            float r2 = Spacing * 0.8f * Spacing * 0.8f;
+            float r2 = Spacing * 0.95f * Spacing * 0.95f;
             for (int i = 0; i < N; i++)
             {
                 int ci = cellOf[i], cx = ci % gw, cy = ci / gw;
@@ -291,7 +349,7 @@ namespace WindowsRug
         public int[] Out;              // premultiplied ARGB
         public int[] Hit;              // topmost triangle per pixel, -1 = none
         public float CamX, CamY;       // point on screen the camera looks straight down at
-        float[] shadow, tmp, casterZ;
+        float[] shadow, tmp, casterZ, depth;
         int capacity;
 
         // Light from the top-left; shadows fall bottom-right.
@@ -374,12 +432,12 @@ namespace WindowsRug
             if (size > capacity)
             {
                 capacity = size + size / 4;
-                Out = new int[capacity]; Hit = new int[capacity];
+                Out = new int[capacity]; Hit = new int[capacity]; depth = new float[capacity];
                 shadow = new float[capacity / 4 + 1]; tmp = new float[capacity / 4 + 1]; casterZ = new float[capacity / 4 + 1];
             }
             Array.Clear(shadow, 0, ssize);
             for (int i = 0; i < ssize; i++) casterZ[i] = -1;
-            for (int i = 0; i < size; i++) Hit[i] = -1;
+            for (int i = 0; i < size; i++) { Hit[i] = -1; depth[i] = float.MinValue; }
 
             int tcount = triKey.Length;
 
@@ -480,6 +538,11 @@ namespace WindowsRug
                     float w2 = 1 - w0 - w1;
                     if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f) continue;
 
+                    // Depth test: only the topmost layer shows.
+                    float z = w0 * z0 + w1 * z1 + w2 * z2;
+                    int idx = row + x;
+                    if (z < depth[idx] - 0.35f) continue;
+
                     // Bilinear texture fetch.
                     float u = w0 * u0 + w1 * u1 + w2 * u2, v = w0 * v0 + w1 * v1 + w2 * v2;
                     int iu = (int)u, iv = (int)v;
@@ -507,7 +570,6 @@ namespace WindowsRug
                     if (covered)
                     {
                         // Shadow cast by a layer folded over this one.
-                        float z = w0 * z0 + w1 * z1 + w2 * z2;
                         int sxp = (int)(x + 0.5f + z * SX) >> 1, syp = (int)(py + z * SY) >> 1;
                         if (sxp < SW && syp < SH)
                         {
@@ -519,7 +581,7 @@ namespace WindowsRug
                     sr *= light; sg *= light; sb *= light;
                     if (sr > sa) sr = sa; if (sg > sa) sg = sa; if (sb > sa) sb = sa;
 
-                    int idx = row + x;
+                    if (sa > 128 && z > depth[idx]) depth[idx] = z;
                     if (sa >= 253)
                         Out[idx] = unchecked((int)0xFF000000) | ((int)sr << 16) | ((int)sg << 8) | (int)sb;
                     else
@@ -714,7 +776,7 @@ namespace WindowsRug
         {
             float moved = Math.Max(cloth.Step(), cloth.Step());
             Render();
-            if (cloth.Grab < 0 && moved < 0.025f) calmFrames++;
+            if (cloth.Grab < 0 && !cloth.Unfolding && moved < 0.025f) calmFrames++;
             else calmFrames = 0;
             if (calmFrames > 40) Sleep();
         }
@@ -778,6 +840,8 @@ namespace WindowsRug
             if (e.Button != MouseButtons.Left) return;
             Point m = Cursor.Position;
             int t = TriangleAt(m);
+            if (t >= 0 && e.Clicks >= 2) { cloth.BeginUnfold(); Wake(); return; }
+            cloth.CancelUnfold();
             if (t < 0) return;
             // Grab the corner of the touched cell closest to the cursor.
             int cellIdx = t / 2, ci = cellIdx % (cloth.NX - 1), cj = cellIdx / (cloth.NX - 1);
@@ -832,7 +896,7 @@ namespace WindowsRug
         void BuildMenu()
         {
             var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
-            menu.Items.Add("افرد السجادة", null, delegate { Rebuild(cloth.CenterX, cloth.CenterY); Wake(); });
+            menu.Items.Add("افرد السجادة", null, delegate { cloth.BeginUnfold(); Wake(); });
             menu.Items.Add("كبّر", null, delegate { ScaleRug(1.15f); });
             menu.Items.Add("صغّر", null, delegate { ScaleRug(1 / 1.15f); });
             menu.Items.Add("لف السجادة", null, delegate { rotated = !rotated; Rebuild(cloth.CenterX, cloth.CenterY); Wake(); });
@@ -856,7 +920,7 @@ namespace WindowsRug
         void Gust()
         {
             ScheduleBreeze();
-            if (cloth.Grab >= 0) return;
+            if (cloth.Grab >= 0 || cloth.Unfolding) return;
             cloth.Gust(rnd);
             Wake();
         }

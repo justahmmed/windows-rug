@@ -7,6 +7,7 @@ The first release of Windows Rug: a cloth-simulated Persian rug for your Windows
 ### Highlights
 
 - **Real cloth physics.** About 750 particles with gravity, desk friction and self-collision. The rug drags behind your cursor, wrinkles under tension, and keeps its folds.
+- **Double-click to shake it out.** However crumpled the rug is, it lifts, slides apart and lands flat again.
 - **Real-time lighting and soft shadows.** The rug has a shaded woven texture, drop shadows, shadows cast by folded layers, and a duller underside.
 - **Desktop layer.** It sits above your icons and below every app window. It survives Win+D and stays out of the taskbar and Alt+Tab.
 - **0% CPU when idle.** The simulation sleeps once the rug settles.
