@@ -1,25 +1,26 @@
-## Windows Rug v1.2.0
+## Windows Rug v1.3.0
 
-Sweep your icons under the rug, and meet the cat.
+The biggest update yet: designs, seasons, a laser pointer and a robot vacuum.
 
-![The cat visiting](https://raw.githubusercontent.com/justahmmed/windows-rug/main/docs/cat.jpg)
+![Lost things, night light, laser chase, a happy cat](https://raw.githubusercontent.com/justahmmed/windows-rug/main/docs/features.jpg)
 
 ### What's new
 
-- **Sweep icons under the rug.** Right-click → *Sweep icons under the rug* gathers every desktop icon into a pile under the rug, then lifts the rug and drops it back over them. *Put icons back* restores every icon to where it was.
-- **A cat comes to visit.** Every few minutes a fluffy long-haired cat wanders onto the rug. It either curls up for a nap or crawls underneath, and you see a lump moving across the rug. Click it, or grab the rug, and it bolts. You can turn it off with *Cat* in the menu.
-- **Dust puffs** when the rug slaps down on the desk.
-- **More defined folds.** Stronger directional lighting gives the cloth clearer depth.
+- **Drop files under the rug.** Drag a desktop file onto the rug and it slips underneath.
+- **Five rug designs**: vintage grey, classic red, kilim, Ramadan and Eid. Also **three floors**: oak, dark walnut and light ash. Or use any picture of your own for either.
+- **More than one rug.** Right-click → *New rug*.
+- **Day and night light.** Cool dawn, white noon, a golden evening and a lamp-lit night, on the rug and the floor.
+- **Seasons.** A Ramadan rug with lanterns and a crescent during Ramadan, an Eid rug at Eid, and snow on the floor in winter. This follows the Hijri calendar automatically.
+- **Lost things under the rug.** Lift a corner to find a coin, a key, a lone sock... New ones every day.
+- **Laser pointer** (**Ctrl+Alt+L**): the cat chases the red dot and pounces on it.
+- **Pet the cat.** Hover over it while it naps; it stretches and rolls onto its back.
+- **Robot vacuum.** It tours the desk now and then and bumps the rug's edges. Sometimes the cat rides along.
 
 ### Still light on resources
 
-The cat is a set of pre-rendered sprites drawn over a cached rug frame. While it naps, nothing runs. The process wakes only for the few seconds the cat or the rug is actually moving.
-
-### Notes
-
-- Sweeping needs **Auto arrange icons** turned off (right-click the desktop → **View**).
+Everything here sleeps when nothing is moving. The light changes once every 20 minutes at most, the robot and laser run only while active, and the cat is pre-rendered.
 
 ### Install
 
 1. Download **WindowsRug.zip** below and extract it.
-2. Double-click **Install.bat**. It replaces any older version.
+2. Double-click **Install.bat**. It replaces any older version and keeps your rug as you left it.

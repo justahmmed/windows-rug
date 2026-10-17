@@ -29,7 +29,7 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force dist\WindowsRug | Out-Null
-          Copy-Item rug\* dist\WindowsRug\
+          Copy-Item rug\* dist\WindowsRug\ -Recurse
           Copy-Item README.md, LICENSE dist\WindowsRug\
           Compress-Archive -Path dist\WindowsRug -DestinationPath dist\WindowsRug.zip
 

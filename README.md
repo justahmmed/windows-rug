@@ -13,6 +13,15 @@
 - **Sweep it under the rug.** One click gathers every desktop icon into a neat pile under the rug, then lifts the rug and drops it back over them. Another click puts every icon back where it was.
 - **A cat comes to visit.** Every few minutes a fluffy cat wanders onto the rug. Sometimes it curls up for a nap, sometimes it crawls underneath and you see a lump moving across the rug. Click the cat, or grab the rug, and it bolts. You can turn the cat off in the menu.
 - **Dust puffs.** The rug kicks up a little dust when it slaps down on the desk.
+- **Drop files under the rug.** Drag any desktop file onto the rug and it slips underneath.
+- **Five designs and three floors.** Vintage grey, classic red, kilim, Ramadan and Eid rugs, on oak, dark walnut or light ash, or use any picture of your own for the rug or the floor.
+- **More than one rug.** Add as many rugs as you like, each with its own design.
+- **Day and night.** The light shifts through the day: cool dawn, white noon, a golden evening and a lamp-lit night, on both the rug and the floor.
+- **Seasons.** During Ramadan the rug turns into a Ramadan rug with lanterns and a crescent, at Eid into an Eid rug, and in winter snow drifts in along the floor's edges. This follows the Hijri calendar automatically.
+- **Lost things under the rug.** Lift a corner and you may find a coin, a key, a lone sock... A new handful turns up every day.
+- **Laser pointer.** Press **Ctrl+Alt+L** and the cursor becomes a red dot the cat chases and pounces on.
+- **Pet the cat.** Hover over the napping cat and it stretches, then rolls onto its back.
+- **Robot vacuum.** Now and then a little robot vacuum tours the desk and bumps into the rug's edges. Sometimes the cat rides it.
 - **Lit and shaded in real time.** A small software rasterizer draws the woven texture with per-vertex lighting. It also draws soft drop shadows, shadows cast by folded layers, and a duller underside.
 - **Lives on the desktop layer.** The rug sits above your icons and below every app window. It stays put when you press Win+D, and it doesn't show up in the taskbar or in Alt+Tab.
 - **Zero cost when idle.** The simulation runs only while the rug is moving. Once it settles, the timer stops, the process sits at 0% CPU, and its working set is trimmed.
@@ -25,6 +34,10 @@
 | ![Dragging](docs/drag.jpg) | ![Folding](docs/fold.jpg) |
 
 ![The cat visiting](docs/cat.jpg)
+
+![Lost things, night light, laser chase, a happy cat](docs/features.jpg)
+
+![Rug designs](docs/designs.jpg)
 
 **Double-click to shake it out:** however crumpled the rug is, it lifts, slides apart and lands flat again.
 
@@ -51,7 +64,10 @@ The installer:
 | Lift a corner | Peek at the icons underneath; let go and the corner flops back down |
 | Double-click | Shakes the rug out and smoothly unfolds it flat, wherever it lies |
 | Click the cat | It runs off |
-| Right-click | **Sweep icons under the rug** · **Put icons back** · **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Breeze** (an edge occasionally lifts on its own) · **Cat** · **Close** |
+| Hover over the napping cat | It stretches and rolls over |
+| Drag a desktop file onto the rug | It goes under the rug |
+| Ctrl+Alt+L | Laser pointer on or off |
+| Right-click | **Sweep icons under the rug** · **Put icons back** · **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Rug design** · **Floor** · **New rug** · **Remove this rug** · **Laser** · **Cat** · **Robot vacuum** · **Breeze** · **Day and night** · **Seasons** · **Close** |
 
 > To sweep icons under the rug, **Auto arrange icons** must be off: right-click the desktop → **View**. If **Align icons to grid** is on, Windows may nudge some icons back onto its grid later.
 
@@ -73,6 +89,8 @@ Double-click **`Uninstall.bat`**. This stops the rug, removes it from Startup, a
 | Window | A per-pixel-alpha layered window (`UpdateLayeredWindow`). Transparent pixels are click-through. The window is owned by `Progman` and pinned to the bottom of the Z-order with `WM_WINDOWPOSCHANGING`. |
 | Cat | Pre-rendered sprites (8 walk frames and a curled-up nap), drawn over a cached copy of the rug frame so the rug isn't re-rendered. While it naps the process sleeps; a timer wakes it when the nap ends. Under the rug, it raises the desk locally and the cloth drapes over the lump. |
 | Icons | The desktop is a list view inside Explorer. Positions are set with `LVM_SETITEMPOSITION`; names and positions are read through a small block of Explorer's memory and saved to `%APPDATA%\WindowsRug\icons.txt` so they can be put back. |
+| Light and seasons | A clock tick every 5 minutes picks the light colour in 20-minute steps and the season (Hijri dates via `UmAlQuraCalendar`). Only when either changes is the wallpaper re-tinted and the rugs redrawn once. |
+| Robot, laser | Separate small layered windows that run only while active. The robot asks each rug for a hit test and pokes the cloth where it bumps. |
 | Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. A watchdog adds damping if the rug keeps moving and puts it to sleep within about 7 seconds of being let go, whatever its shape. |
 
 ## Project layout
@@ -82,12 +100,16 @@ rug/
   Rug.cs            simulation, renderer and desktop window (C# 5, single file)
   Install.ps1/.bat  build the exe, set wallpaper, add to Startup
   Uninstall.ps1/.bat
-  rug.png           rug texture
+  rugs/*.png        rug designs
+  floors/*.jpg      floor wallpapers
   cat.png           cat sprite sheet
+  items.png         things lost under the rug
+  robot.png         robot vacuum
   wood.jpg          wallpaper
 tools/
   make_assets.py    procedurally generates rug.png and wood.jpg (Python 3, Pillow, NumPy)
   make_cat.py       renders the cat sprite sheet from a lit height-field model
+  make_props.py     renders the lost items and the robot vacuum
 ```
 
 ## Building manually
@@ -98,7 +120,7 @@ Add-Type -TypeDefinition (Get-Content rug\Rug.cs -Raw -Encoding UTF8) `
     -OutputAssembly WindowsRug.exe -OutputType WindowsApplication
 ```
 
-Copy `rug.png` and `cat.png` next to the exe and run it.
+Copy `rugs/`, `floors/`, `cat.png`, `items.png` and `robot.png` next to the exe and run it.
 
 ## License
 

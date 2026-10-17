@@ -35,7 +35,7 @@ namespace WindowsRug
                 if (!created) return;
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
-                Application.Run(new RugForm(dir));
+                Application.Run(new RugManager(dir));
             }
         }
     }
@@ -401,6 +401,19 @@ namespace WindowsRug
 
         float[] lift;
 
+        // Something knocks the rug at (x, y): nearby points get an upward kick.
+        public void Poke(float x, float y, float radius, float power)
+        {
+            for (int i = 0; i < N; i++)
+            {
+                float dx = X[i] - x, dy = Y[i] - y, d2 = dx * dx + dy * dy;
+                if (d2 > radius * radius) continue;
+                float f = 1 - (float)Math.Sqrt(d2) / radius;
+                PZ[i] = Z[i] - power * f * f;
+                supported[i] = false;
+            }
+        }
+
         // A puff of air lifting one edge.
         public void Gust(Random rnd)
         {
@@ -432,6 +445,9 @@ namespace WindowsRug
         public int[] Hit;              // topmost triangle per pixel, -1 = none
         public float CamX, CamY;       // point on screen the camera looks straight down at
         public int Pad = 16;           // margin around the rug (room for shadows, dust, the cat)
+        public float TintR = 1, TintG = 1, TintB = 1;   // time-of-day light colour
+        // Drawn on the desk before the rug, so it only shows where the rug is lifted.
+        public Action<Graphics, int, int> UnderLayer;
         float[] shadow, tmp, casterZ, depth;
         int capacity;
 
@@ -545,6 +561,21 @@ namespace WindowsRug
                     int al = (int)(shadow[srow + Math.Min(SW - 1, x >> 1)] * 255);
                     Out[row + x] = al > 255 ? unchecked((int)0xFF000000) : al << 24;
                 }
+            }
+
+            if (UnderLayer != null)
+            {
+                var pin = GCHandle.Alloc(Out, GCHandleType.Pinned);
+                try
+                {
+                    using (var bmp = new Bitmap(W, H, W * 4, PixelFormat.Format32bppPArgb, pin.AddrOfPinnedObject()))
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        UnderLayer(g, OX, OY);
+                    }
+                }
+                finally { pin.Free(); }
             }
 
             // Colour pass, lowest triangles first.
@@ -661,7 +692,7 @@ namespace WindowsRug
                         }
                     }
 
-                    sr *= light; sg *= light; sb *= light;
+                    sr *= light * TintR; sg *= light * TintG; sb *= light * TintB;
                     if (sr > sa) sr = sa; if (sg > sa) sg = sa; if (sb > sa) sb = sa;
 
                     if (sa > 128 && z > depth[idx]) depth[idx] = z;
@@ -764,8 +795,13 @@ namespace WindowsRug
     // (a moving lump). Nothing runs while it is away or asleep.
     public class Cat
     {
-        enum State { Away, Walk, Nap, Hide, Flee }
+        enum State { Away, Walk, Nap, Hide, Flee, Chase, Pet }
         State state = State.Away;
+        float chaseU, chaseV, pounceLeft, petT, pounceU = 1e9f, pounceV = 1e9f;
+        bool chaseInside;
+
+        // Day/night colour applied to every sprite (set by the rug manager).
+        public static float TintR = 1, TintG = 1, TintB = 1;
         bool napAfterWalk;
         float u, v, heading, phase, alpha, napLeft, scale = 1;
         readonly List<PointF> path = new List<PointF>();
@@ -778,8 +814,8 @@ namespace WindowsRug
 
         public void LoadSprites(Bitmap sheet)
         {
-            const int frames = 9;
-            cellW = sheet.Width / frames; cellH = sheet.Height / 2;
+            cellH = sheet.Height / 2; cellW = cellH * 3 / 2;   // 180 x 120 cells
+            int frames = sheet.Width / cellW;
             sprites = new Bitmap[frames]; shadows = new Bitmap[frames];
             for (int i = 0; i < frames; i++)
             {
@@ -788,8 +824,45 @@ namespace WindowsRug
             }
         }
 
-        public bool Visible { get { return state == State.Walk || state == State.Nap || state == State.Flee; } }
-        public bool Busy { get { return state == State.Walk || state == State.Hide || state == State.Flee; } }
+        public bool Visible { get { return state == State.Walk || state == State.Nap || state == State.Flee || state == State.Chase || state == State.Pet; } }
+        public bool Busy { get { return state == State.Walk || state == State.Hide || state == State.Flee || state == State.Chase || state == State.Pet; } }
+        public bool Chasing { get { return state == State.Chase; } }
+        public Bitmap NapSprite { get { return sprites == null ? null : sprites[8]; } }
+        public Bitmap NapShadow { get { return shadows == null ? null : shadows[8]; } }
+
+        // Laser pointer: run at the dot (in flat-rug coordinates).
+        public void StartChase(Cloth c, float rugScale, float tu, float tv)
+        {
+            if (state == State.Away)
+            {
+                scale = rugScale * 2.3f;
+                u = Math.Max(-c.HalfW, Math.Min(c.HalfW, tu)); v = Math.Max(-c.HalfH, Math.Min(c.HalfH, tv));
+                // Come in from the nearest edge.
+                if (c.HalfW - Math.Abs(u) < c.HalfH - Math.Abs(v)) u = Math.Sign(u == 0 ? 1 : u) * c.HalfW * 1.05f;
+                else v = Math.Sign(v == 0 ? 1 : v) * c.HalfH * 1.05f;
+                alpha = 0; phase = 0;
+            }
+            c.BumpOn = false;
+            state = State.Chase;
+            SetChaseTarget(c, tu, tv);
+        }
+
+        public void SetChaseTarget(Cloth c, float tu, float tv)
+        {
+            chaseInside = Math.Abs(tu) < c.HalfW && Math.Abs(tv) < c.HalfH;
+            chaseU = Math.Max(-c.HalfW * 0.92f, Math.Min(c.HalfW * 0.92f, tu));
+            chaseV = Math.Max(-c.HalfH * 0.92f, Math.Min(c.HalfH * 0.92f, tv));
+        }
+
+        public void EndChase(Cloth c)
+        {
+            if (state != State.Chase) return;
+            state = State.Walk; napAfterWalk = false;
+            path.Clear(); path.Add(EdgePoint(c, 1.1f));
+        }
+
+        // Stroked while napping: a long stretch, then a roll onto its back.
+        public void Pet() { if (state == State.Nap) { state = State.Pet; petT = 0; } }
         public bool Present { get { return state != State.Away; } }
         public bool Hiding { get { return state == State.Hide; } }
         public bool Napping { get { return state == State.Nap; } }
@@ -858,6 +931,34 @@ namespace WindowsRug
         public void Update(float dt, Cloth c)
         {
             if (state == State.Away) return;
+            if (state == State.Pet)
+            {
+                petT += dt;
+                if (petT > 5.5f) state = State.Nap;
+                return;
+            }
+            if (state == State.Chase)
+            {
+                alpha = Math.Min(1, alpha + dt * 3);
+                if (pounceLeft > 0) { pounceLeft -= dt; return; }
+                float dx = chaseU - u, dy = chaseV - v, d = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (d > 3 * scale)
+                {
+                    float step = Math.Min(d, 150 * scale * dt);
+                    u += dx / d * step; v += dy / d * step;
+                    float want = (float)Math.Atan2(dy, dx), diff = want - heading;
+                    while (diff > Math.PI) diff -= (float)(2 * Math.PI);
+                    while (diff < -Math.PI) diff += (float)(2 * Math.PI);
+                    heading += diff * Math.Min(1, dt * 10);
+                    phase += step / (6 * scale);
+                }
+                else if (chaseInside)
+                {
+                    float px = chaseU - pounceU, py = chaseV - pounceV;
+                    if (px * px + py * py > 100 * scale * scale) { pounceLeft = 0.35f; pounceU = chaseU; pounceV = chaseV; }
+                }
+                return;
+            }
             if (state == State.Nap)
             {
                 napLeft -= dt;
@@ -918,12 +1019,14 @@ namespace WindowsRug
         void DrawSprite(Graphics g, int ox, int oy, float rugAngle)
         {
             int frame = state == State.Nap ? 8 : (((int)(phase / (2 * Math.PI) * 8)) % 8 + 8) % 8;
+            if (state == State.Pet) frame = petT < 1.3f || sprites.Length < 11 ? Math.Min(9, sprites.Length - 1) : 10;
+            if (state == State.Chase && pounceLeft > 0 && sprites.Length > 9) frame = 9;
             float k = scale / 2.3f * (1 + sz * 0.004f);
             float deg = (float)((rugAngle + heading) * 180 / Math.PI);
             g.InterpolationMode = InterpolationMode.Bilinear;
             using (var ia = new ImageAttributes())
             {
-                var cm = new ColorMatrix { Matrix33 = alpha };
+                var cm = new ColorMatrix { Matrix00 = TintR, Matrix11 = TintG, Matrix22 = TintB, Matrix33 = alpha };
                 ia.SetColorMatrix(cm);
                 float rad = (float)(deg * Math.PI / 180), cs = (float)Math.Cos(rad) * k, sn = (float)Math.Sin(rad) * k;
                 for (int pass = 0; pass < 2; pass++)
@@ -1104,9 +1207,10 @@ namespace WindowsRug
         public static Point ToClient(IntPtr lv, Point screen) { ScreenToClient(lv, ref screen); return screen; }
     }
 
-    public class RugForm : Form
+    // Shared plumbing for per-pixel-alpha windows: on the desktop layer (above the
+    // icons, below every app) unless TopLayer is set.
+    public class LayeredWindow : Form
     {
-        // ---- Win32 ----
         [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; public POINT(int x, int y) { this.x = x; this.y = y; } }
         [StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx, cy; public SIZE(int cx, int cy) { this.cx = cx; this.cy = cy; } }
         [StructLayout(LayoutKind.Sequential, Pack = 1)] struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
@@ -1133,62 +1237,24 @@ namespace WindowsRug
         [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
         [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
 
-        const int WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+        const int WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000,
+                  WS_EX_TRANSPARENT = 0x20, WS_EX_TOPMOST = 0x8;
         const int WM_WINDOWPOSCHANGING = 0x46, GWL_HWNDPARENT = -8;
         const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
         static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
 
-        // ---- State ----
-        readonly string stateFile;
-        readonly Bitmap source;
-        Texture tex;
-        Cloth cloth;
-        readonly Renderer renderer = new Renderer();
-        float scale = 0.6f;
-        bool rotated, breeze, catOn = true;
-        readonly Dust dust = new Dust();
-        readonly Cat cat = new Cat();
-        readonly System.Windows.Forms.Timer catTimer = new System.Windows.Forms.Timer();
-        bool simAwake, clothDirty = true;
-        int lastPad = -1;
-        int[] work;
-        string iconsFile;
-
-        readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
-        readonly System.Windows.Forms.Timer breezeTimer = new System.Windows.Forms.Timer();
-        readonly Random rnd = new Random();
-        int calmFrames, restlessFrames;
-        float grabOffX, grabOffY, mouseVX, mouseVY;
-        Point lastMouse;
+        protected bool TopLayer;    // a click-through overlay above everything (the laser dot)
 
         IntPtr memDc, dib, dibBits, oldBmp;
         int dibW, dibH;
 
-        public RugForm(string dir)
+        public LayeredWindow()
         {
-            string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsRug");
-            Directory.CreateDirectory(appData);
-            stateFile = Path.Combine(appData, "state.txt");
-            iconsFile = Path.Combine(appData, "icons.txt");
-
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Text = "Windows Rug";
             Location = new Point(-32000, -32000);
-
-            source = new Bitmap(Path.Combine(dir, "rug.png"));
-            string catSheet = Path.Combine(dir, "cat.png");
-            if (File.Exists(catSheet)) using (var sheet = new Bitmap(catSheet)) cat.LoadSprites(sheet);
-            if (!LoadState()) Rebuild(float.NaN, float.NaN);
-
-            tick.Interval = 15;
-            tick.Tick += delegate { Frame(); };
-            breezeTimer.Tick += delegate { Gust(); };
-            ScheduleBreeze();
-            catTimer.Tick += delegate { CatVisit(); };
-            ScheduleCat(true);
-            BuildMenu();
+            Size = new Size(1, 1);
         }
 
         protected override CreateParams CreateParams
@@ -1197,6 +1263,7 @@ namespace WindowsRug
             {
                 var cp = base.CreateParams;
                 cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                if (TopLayer) cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOPMOST;
                 return cp;
             }
         }
@@ -1206,6 +1273,7 @@ namespace WindowsRug
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            if (TopLayer) return;
             // Owned by the desktop: survives "Show desktop" (Win+D) and stays
             // above the icons, while WM_WINDOWPOSCHANGING keeps it under apps.
             IntPtr progman = FindWindow("Progman", null);
@@ -1214,14 +1282,12 @@ namespace WindowsRug
                 if (IntPtr.Size == 8) SetWindowLongPtr64(Handle, GWL_HWNDPARENT, progman);
                 else SetWindowLong32(Handle, GWL_HWNDPARENT, progman.ToInt32());
             }
-            Render();
             SetWindowPos(Handle, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            Wake();
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_WINDOWPOSCHANGING)
+            if (m.Msg == WM_WINDOWPOSCHANGING && !TopLayer)
             {
                 var wp = (WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(WINDOWPOS));
                 if ((wp.flags & SWP_NOZORDER) == 0)
@@ -1233,8 +1299,799 @@ namespace WindowsRug
             base.WndProc(ref m);
         }
 
-        // ---- Setup ----
-        void Rebuild(float cx, float cy)
+        // Shows a premultiplied ARGB buffer at screen position (x, y).
+        protected void Present(int[] buf, int x, int y, int w, int h)
+        {
+            if (!IsHandleCreated) return;
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            if (w != dibW || h != dibH)
+            {
+                FreeDib();
+                memDc = CreateCompatibleDC(screenDc);
+                var bi = new BITMAPINFOHEADER { biSize = 40, biWidth = w, biHeight = -h, biPlanes = 1, biBitCount = 32 };
+                dib = CreateDIBSection(memDc, ref bi, 0, out dibBits, IntPtr.Zero, 0);
+                oldBmp = SelectObject(memDc, dib);
+                dibW = w; dibH = h;
+            }
+            Marshal.Copy(buf, 0, dibBits, w * h);
+            var size = new SIZE(w, h);
+            var src = new POINT(0, 0);
+            var dst = new POINT(x, y);
+            var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+            UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+
+        // Draws with GDI+ straight into a premultiplied buffer.
+        protected static void PaintBuffer(int[] buf, int w, int h, Action<Graphics> draw)
+        {
+            var pin = GCHandle.Alloc(buf, GCHandleType.Pinned);
+            try
+            {
+                using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, pin.AddrOfPinnedObject()))
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.Bilinear;
+                    draw(g);
+                }
+            }
+            finally { pin.Free(); }
+        }
+
+        void FreeDib()
+        {
+            if (memDc == IntPtr.Zero) return;
+            SelectObject(memDc, oldBmp);
+            DeleteObject(dib);
+            DeleteDC(memDc);
+            memDc = IntPtr.Zero; dibW = dibH = 0;
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            FreeDib();
+            base.OnFormClosed(e);
+        }
+
+        public static void TrimMemory()
+        {
+            GC.Collect();
+            try { SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1)); } catch { }
+        }
+
+        // Draws a sprite rotated by deg and scaled by k around (px, py).
+        public static void DrawRotated(Graphics g, Bitmap img, float px, float py, float deg, float k, ImageAttributes ia)
+        {
+            float rad = (float)(deg * Math.PI / 180), cs = (float)Math.Cos(rad) * k, sn = (float)Math.Sin(rad) * k;
+            float hx = img.Width / 2f, hy = img.Height / 2f;
+            var dest = new[] {
+                new PointF(px - hx * cs + hy * sn, py - hx * sn - hy * cs),
+                new PointF(px + hx * cs + hy * sn, py + hx * sn - hy * cs),
+                new PointF(px - hx * cs - hy * sn, py - hx * sn + hy * cs) };
+            if (ia != null) g.DrawImage(img, dest, new RectangleF(0, 0, img.Width, img.Height), GraphicsUnit.Pixel, ia);
+            else g.DrawImage(img, dest);
+        }
+
+        public static ImageAttributes Tinted(float alpha)
+        {
+            var ia = new ImageAttributes();
+            ia.SetColorMatrix(new ColorMatrix { Matrix00 = Cat.TintR, Matrix11 = Cat.TintG, Matrix22 = Cat.TintB, Matrix33 = alpha });
+            return ia;
+        }
+    }
+
+    // Settings shared by every rug.
+    public class GlobalSettings
+    {
+        public string Floor = "oak";        // built-in floor name, an image path, or "none"
+        public bool DayNight = true, Seasons = true, Cat = true, Robot = true;
+        readonly string file;
+
+        public GlobalSettings(string file) { this.file = file; }
+
+        public void Load()
+        {
+            try
+            {
+                if (!File.Exists(file)) return;
+                foreach (var line in File.ReadAllLines(file, System.Text.Encoding.UTF8))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq < 0) continue;
+                    string k = line.Substring(0, eq), v = line.Substring(eq + 1);
+                    if (k == "floor") Floor = v;
+                    else if (k == "daynight") DayNight = v == "1";
+                    else if (k == "seasons") Seasons = v == "1";
+                    else if (k == "cat") Cat = v == "1";
+                    else if (k == "robot") Robot = v == "1";
+                }
+            }
+            catch { }
+        }
+
+        public void Save()
+        {
+            try
+            {
+                File.WriteAllLines(file, new[] {
+                    "floor=" + Floor, "daynight=" + (DayNight ? "1" : "0"), "seasons=" + (Seasons ? "1" : "0"),
+                    "cat=" + (Cat ? "1" : "0"), "robot=" + (Robot ? "1" : "0") }, System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+
+    // Things lost under the rug. They live in the rug's flat frame, so they are
+    // always underneath it and only show when a corner is lifted.
+    public class LostItems
+    {
+        struct Item { public int Kind; public float U, V, Angle; }
+        readonly List<Item> items = new List<Item>();
+        Bitmap[] sprites, shadows;
+
+        public LostItems(Bitmap sheet)
+        {
+            if (sheet == null) return;
+            int cell = sheet.Height / 2, n = sheet.Width / cell;
+            sprites = new Bitmap[n]; shadows = new Bitmap[n];
+            for (int i = 0; i < n; i++)
+            {
+                sprites[i] = sheet.Clone(new Rectangle(i * cell, 0, cell, cell), PixelFormat.Format32bppPArgb);
+                shadows[i] = sheet.Clone(new Rectangle(i * cell, cell, cell, cell), PixelFormat.Format32bppPArgb);
+            }
+        }
+
+        // A new handful every day.
+        public void Scatter(Cloth c, int seed)
+        {
+            items.Clear();
+            if (sprites == null) return;
+            var r = new Random(seed);
+            int n = 2 + r.Next(3);
+            for (int i = 0; i < n; i++)
+                items.Add(new Item {
+                    Kind = r.Next(sprites.Length),
+                    U = (float)(r.NextDouble() * 2 - 1) * c.HalfW * 0.85f,
+                    V = (float)(r.NextDouble() * 2 - 1) * c.HalfH * 0.8f,
+                    Angle = (float)(r.NextDouble() * 360) });
+        }
+
+        public void Draw(Graphics g, Cloth c, int ox, int oy, float k)
+        {
+            if (sprites == null || items.Count == 0) return;
+            float cx, cy, cos, sin;
+            c.FitFlat(out cx, out cy, out cos, out sin);
+            float rugDeg = (float)(Math.Atan2(sin, cos) * 180 / Math.PI);
+            using (var ia = LayeredWindow.Tinted(1))
+                foreach (var it in items)
+                {
+                    float x = cx + it.U * cos - it.V * sin - ox, y = cy + it.U * sin + it.V * cos - oy;
+                    LayeredWindow.DrawRotated(g, shadows[it.Kind], x + 2 * k, y + 3 * k, rugDeg + it.Angle, k, null);
+                    LayeredWindow.DrawRotated(g, sprites[it.Kind], x, y, rugDeg + it.Angle, k, ia);
+                }
+        }
+    }
+
+    // Runs every rug, the cat's visits, the robot, the laser, the floor and the clock.
+    public class RugManager : ApplicationContext
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SystemParametersInfo(int action, int param, string value, int flags);
+
+        public readonly string Dir, AppData;
+        public readonly GlobalSettings S;
+        public readonly List<RugForm> Rugs = new List<RugForm>();
+        public Bitmap CatSheet, ItemsSheet;
+        public string Season = "";
+        public float TintR = 1, TintG = 1, TintB = 1;
+        public readonly Random Rnd = new Random();
+
+        readonly System.Windows.Forms.Timer catTimer = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer robotTimer = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer clockTimer = new System.Windows.Forms.Timer();
+        RobotForm robot;
+        LaserForm laser;
+        HotkeyWindow hotkey;
+        string wallpaperKey = "";
+        int wallpaperFlip;
+
+        public static readonly string[] Designs = { "vintage", "classic", "kilim", "ramadan", "eid" };
+        public static readonly string[] DesignNames = { "رمادي فينتدج", "أحمر كلاسيك", "كليم", "رمضان", "عيد" };
+        public static readonly string[] Floors = { "oak", "walnut", "ash" };
+        public static readonly string[] FloorNames = { "خشب بلوط", "خشب جوز غامق", "خشب فاتح" };
+
+        public RugManager(string dir)
+        {
+            Dir = dir;
+            AppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsRug");
+            Directory.CreateDirectory(AppData);
+            S = new GlobalSettings(Path.Combine(AppData, "settings.txt"));
+            S.Load();
+            string p = Path.Combine(dir, "cat.png"); if (File.Exists(p)) CatSheet = new Bitmap(p);
+            p = Path.Combine(dir, "items.png"); if (File.Exists(p)) ItemsSheet = new Bitmap(p);
+
+            UpdateClock(true);
+
+            // Older versions kept a single state.txt.
+            string old = Path.Combine(AppData, "state.txt");
+            if (File.Exists(old) && !File.Exists(StateFile(1))) { try { File.Move(old, StateFile(1)); } catch { } }
+            var ids = new List<int>();
+            try
+            {
+                foreach (var f in Directory.GetFiles(AppData, "state-*.txt"))
+                {
+                    int id;
+                    if (int.TryParse(Path.GetFileNameWithoutExtension(f).Substring(6), out id)) ids.Add(id);
+                }
+            }
+            catch { }
+            ids.Sort();
+            if (ids.Count == 0) ids.Add(1);
+            foreach (int id in ids) OpenRug(id);
+
+            robot = new RobotForm(this);
+            laser = new LaserForm(this);
+            hotkey = new HotkeyWindow(ToggleLaser);
+
+            catTimer.Tick += delegate { CatTick(); };
+            ScheduleCat(true);
+            robotTimer.Tick += delegate { RobotTick(); };
+            ScheduleRobot(true);
+            clockTimer.Interval = 5 * 60 * 1000;
+            clockTimer.Tick += delegate { UpdateClock(false); };
+            clockTimer.Start();
+        }
+
+        public string StateFile(int id) { return Path.Combine(AppData, "state-" + id + ".txt"); }
+        public string IconsFile { get { return Path.Combine(AppData, "icons.txt"); } }
+
+        RugForm OpenRug(int id)
+        {
+            var r = new RugForm(this, id);
+            Rugs.Add(r);
+            r.FormClosed += delegate { Rugs.Remove(r); if (Rugs.Count == 0 && !quitting) Quit(); };
+            r.Show();
+            return r;
+        }
+
+        public void AddRug(RugForm near)
+        {
+            int id = 1;
+            foreach (var r in Rugs) id = Math.Max(id, r.Id + 1);
+            var nr = OpenRug(id);
+            nr.PlaceNear(near);
+        }
+
+        public void RemoveRug(RugForm r)
+        {
+            if (Rugs.Count <= 1) return;
+            r.Forget();
+            r.Close();
+        }
+
+        bool quitting;
+
+        public void Quit()
+        {
+            if (quitting) return;
+            quitting = true;
+            foreach (var r in Rugs.ToArray()) { r.SaveState(); r.Close(); }
+            hotkey.Dispose();
+            ExitThread();
+        }
+
+        public bool IsMainRug(RugForm r) { return Rugs.Count > 0 && Rugs[0] == r; }
+
+        // Seasonal design for the main rug, or null.
+        public string SeasonalDesign { get { return S.Seasons && (Season == "ramadan" || Season == "eid") ? Season : null; } }
+
+        public string DesignFile(string key)
+        {
+            foreach (var d in Designs) if (d == key) return Path.Combine(Dir, "rugs", key + ".png");
+            return File.Exists(key) ? key : Path.Combine(Dir, "rugs", "vintage.png");
+        }
+
+        // ---- Clock: day/night light and seasons ----
+        public void UpdateClock(bool first)
+        {
+            var now = DateTime.Now;
+            string season = "";
+            try
+            {
+                var hijri = new UmAlQuraCalendar();
+                int hm = hijri.GetMonth(now), hd = hijri.GetDayOfMonth(now);
+                if (hm == 9) season = "ramadan";
+                else if ((hm == 10 && hd <= 3) || (hm == 12 && hd >= 10 && hd <= 13)) season = "eid";
+            }
+            catch { }
+            if (season == "" && ((now.Month == 12 && now.Day >= 15) || now.Month == 1 || (now.Month == 2 && now.Day <= 15))) season = "winter";
+
+            float r = 1, g = 1, b = 1;
+            if (S.DayNight)
+            {
+                // Light through the day: cool dawn, white noon, golden evening, lamp-lit night.
+                float[] hours = { 0, 5, 7, 9, 16, 18, 20, 24 };
+                float[,] cols = { { .62f, .54f, .46f }, { .6f, .56f, .54f }, { .95f, .92f, .9f }, { 1, 1, 1 }, { 1, 1, 1 },
+                                  { 1f, .87f, .72f }, { .72f, .62f, .52f }, { .62f, .54f, .46f } };
+                float hNow = (float)Math.Round((now.Hour + now.Minute / 60f) * 3) / 3;   // 20-minute steps
+                for (int i = 0; i < hours.Length - 1; i++)
+                    if (hNow >= hours[i] && hNow <= hours[i + 1])
+                    {
+                        float t = (hNow - hours[i]) / (hours[i + 1] - hours[i]);
+                        r = cols[i, 0] + (cols[i + 1, 0] - cols[i, 0]) * t;
+                        g = cols[i, 1] + (cols[i + 1, 1] - cols[i, 1]) * t;
+                        b = cols[i, 2] + (cols[i + 1, 2] - cols[i, 2]) * t;
+                        break;
+                    }
+            }
+            bool changed = first || r != TintR || g != TintG || b != TintB || season != Season;
+            TintR = r; TintG = g; TintB = b; Season = season;
+            Cat.TintR = r; Cat.TintG = g; Cat.TintB = b;
+            if (!changed) return;
+            ApplyWallpaper(false);
+            foreach (var rug in Rugs) rug.OnClockChanged();
+        }
+
+        public void ApplyWallpaper(bool force)
+        {
+            if (S.Floor == "none") return;
+            string src = null;
+            foreach (var f in Floors) if (f == S.Floor) src = Path.Combine(Dir, "floors", f + ".jpg");
+            if (src == null) src = S.Floor;
+            if (!File.Exists(src)) return;
+            string key = src + "|" + TintR + TintG + TintB + "|" + (S.Seasons ? Season : "");
+            if (!force && key == wallpaperKey) return;
+            wallpaperKey = key;
+            try
+            {
+                var screen = Screen.PrimaryScreen.Bounds;
+                using (var img = new Bitmap(src))
+                using (var outImg = new Bitmap(screen.Width, screen.Height, PixelFormat.Format24bppRgb))
+                {
+                    using (var g = Graphics.FromImage(outImg))
+                    using (var ia = new ImageAttributes())
+                    {
+                        ia.SetColorMatrix(new ColorMatrix { Matrix00 = TintR, Matrix11 = TintG, Matrix22 = TintB });
+                        // Fill the screen, cropping like Windows' "Fill" mode.
+                        float s = Math.Max(screen.Width / (float)img.Width, screen.Height / (float)img.Height);
+                        float w = img.Width * s, h = img.Height * s;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(img, new Rectangle((int)((screen.Width - w) / 2), (int)((screen.Height - h) / 2), (int)w, (int)h),
+                                    0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
+                        if (TintB < 0.8f) DrawLampGlow(g, screen.Width, screen.Height, 0.8f - TintB);
+                        if (S.Seasons && Season == "winter") DrawSnow(g, screen.Width, screen.Height);
+                    }
+                    // Alternate file names so Windows notices the change.
+                    string path = Path.Combine(AppData, "wallpaper-" + (wallpaperFlip++ % 2) + ".jpg");
+                    outImg.Save(path, ImageFormat.Jpeg);
+                    var reg = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true);
+                    if (reg != null) { reg.SetValue("WallpaperStyle", "10"); reg.SetValue("TileWallpaper", "0"); reg.Close(); }
+                    SystemParametersInfo(20, 0, path, 3);
+                }
+            }
+            catch { }
+        }
+
+        // Evening: a warm pool of lamplight in the room.
+        static void DrawLampGlow(Graphics g, int w, int h, float strength)
+        {
+            using (var path = new GraphicsPath())
+            {
+                path.AddEllipse(-w * 0.2f, -h * 0.3f, w * 0.9f, h * 1.1f);
+                using (var br = new PathGradientBrush(path))
+                {
+                    br.CenterColor = Color.FromArgb((int)(Math.Min(1, strength * 1.6f) * 90), 255, 196, 120);
+                    br.SurroundColors = new[] { Color.FromArgb(0, 255, 196, 120) };
+                    g.FillPath(br, path);
+                }
+            }
+        }
+
+        // Winter: drifts of snow blown in along the edges.
+        static void DrawSnow(Graphics g, int w, int h)
+        {
+            var r = new Random(7);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            for (int i = 0; i < 2600; i++)
+            {
+                float x, y;
+                int edge = r.Next(4);
+                float depth = (float)Math.Pow(r.NextDouble(), 2.2) * Math.Min(w, h) * 0.16f;
+                if (edge == 0) { x = (float)r.NextDouble() * w; y = h - depth; }
+                else if (edge == 1) { x = (float)r.NextDouble() * w; y = depth; }
+                else if (edge == 2) { x = depth; y = (float)r.NextDouble() * h; }
+                else { x = w - depth; y = (float)r.NextDouble() * h; }
+                float rad = 1.5f + (float)r.NextDouble() * 5;
+                int a = (int)(40 + 150 * (1 - depth / (Math.Min(w, h) * 0.16f)));
+                using (var br = new SolidBrush(Color.FromArgb(Math.Min(230, a), 248, 250, 255)))
+                    g.FillEllipse(br, x - rad, y - rad, rad * 2, rad * 2);
+            }
+        }
+
+        // ---- Cat visits ----
+        public bool AnyCatPresent { get { foreach (var r in Rugs) if (r.CatPresent) return true; return robot != null && robot.CatRiding; } }
+
+        void ScheduleCat(bool soon)
+        {
+            catTimer.Interval = soon ? 45000 + Rnd.Next(60000) : 180000 + Rnd.Next(240000);
+            catTimer.Enabled = S.Cat;
+        }
+
+        void CatTick()
+        {
+            ScheduleCat(false);
+            if (!S.Cat || AnyCatPresent || laser.Active || Rugs.Count == 0) return;
+            Rugs[Rnd.Next(Rugs.Count)].CatVisit();
+        }
+
+        public void SetCat(bool on)
+        {
+            S.Cat = on; S.Save();
+            if (on) ScheduleCat(true);
+            else { catTimer.Enabled = false; foreach (var r in Rugs) r.ScareCat(); }
+        }
+
+        // ---- Laser ----
+        public bool LaserActive { get { return laser != null && laser.Active; } }
+
+        public void ToggleLaser()
+        {
+            if (laser.Active) { laser.Stop(); return; }
+            laser.Start();
+        }
+
+        public void OnLaser(Point p)
+        {
+            RugForm target = null;
+            foreach (var r in Rugs) if (r.Contains(p, 60)) { target = r; break; }
+            if (target == null)
+            {
+                // Off the rugs: the cat waits at the edge nearest the dot.
+                foreach (var r in Rugs) if (r.CatChasing) { target = r; break; }
+            }
+            if (target == null) target = Rugs.Count > 0 ? Rugs[0] : null;
+            foreach (var r in Rugs) if (r != target) r.ScareCat();
+            if (target != null && S.Cat) target.ChaseLaser(p);
+        }
+
+        public void OnLaserStopped() { foreach (var r in Rugs) r.EndChase(); }
+
+        // ---- Robot ----
+        void ScheduleRobot(bool soon)
+        {
+            robotTimer.Interval = soon ? 120000 + Rnd.Next(120000) : 480000 + Rnd.Next(420000);
+            robotTimer.Enabled = S.Robot;
+        }
+
+        void RobotTick()
+        {
+            ScheduleRobot(false);
+            if (S.Robot && !robot.Running) robot.Start(S.Cat && !AnyCatPresent && Rnd.NextDouble() < 0.35);
+        }
+
+        public void SetRobot(bool on)
+        {
+            S.Robot = on; S.Save();
+            if (on) { ScheduleRobot(true); } else { robotTimer.Enabled = false; robot.GoHome(); }
+        }
+
+        public void RunRobotNow() { if (!robot.Running) robot.Start(S.Cat && !AnyCatPresent && Rnd.NextDouble() < 0.35); }
+
+        public Bitmap CatNapSprite { get { return Rugs.Count > 0 ? Rugs[0].CatNapSprite : null; } }
+        public Bitmap CatNapShadow { get { return Rugs.Count > 0 ? Rugs[0].CatNapShadow : null; } }
+    }
+
+    // Ctrl+Alt+L anywhere toggles the laser pointer.
+    public class HotkeyWindow : NativeWindow, IDisposable
+    {
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+        [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        readonly Action onHotkey;
+
+        public HotkeyWindow(Action onHotkey)
+        {
+            this.onHotkey = onHotkey;
+            CreateHandle(new CreateParams());
+            RegisterHotKey(Handle, 1, 0x1 | 0x2 | 0x4000, (uint)Keys.L);   // Alt + Ctrl, no repeat
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x312 && m.WParam.ToInt32() == 1) onHotkey();
+            base.WndProc(ref m);
+        }
+
+        public void Dispose()
+        {
+            if (Handle == IntPtr.Zero) return;
+            UnregisterHotKey(Handle, 1);
+            DestroyHandle();
+        }
+    }
+
+    // The red dot that follows the cursor while the laser is on.
+    public class LaserForm : LayeredWindow
+    {
+        readonly RugManager m;
+        readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
+        readonly int[] buf;
+        const int Size_ = 36;
+        Point last;
+        DateTime lastMove, started;
+        readonly Random rnd = new Random();
+        public bool Active { get; private set; }
+
+        public LaserForm(RugManager m)
+        {
+            this.m = m;
+            TopLayer = true;
+            TopMost = true;
+            buf = new int[Size_ * Size_];
+            PaintBuffer(buf, Size_, Size_, g =>
+            {
+                using (var path = new GraphicsPath())
+                {
+                    path.AddEllipse(2, 2, Size_ - 4, Size_ - 4);
+                    using (var br = new PathGradientBrush(path))
+                    {
+                        br.CenterColor = Color.FromArgb(150, 255, 40, 30);
+                        br.SurroundColors = new[] { Color.FromArgb(0, 255, 40, 30) };
+                        g.FillPath(br, path);
+                    }
+                }
+                using (var br = new SolidBrush(Color.FromArgb(255, 255, 70, 60))) g.FillEllipse(br, Size_ / 2f - 3.5f, Size_ / 2f - 3.5f, 7, 7);
+                using (var br = new SolidBrush(Color.FromArgb(230, 255, 230, 220))) g.FillEllipse(br, Size_ / 2f - 1.5f, Size_ / 2f - 1.5f, 3, 3);
+            });
+            tick.Interval = 16;
+            tick.Tick += delegate { Step(); };
+        }
+
+        public void Start()
+        {
+            Active = true;
+            if (!Visible) Show();
+            started = lastMove = DateTime.Now;
+            last = new Point(int.MinValue, 0);
+            tick.Start();
+        }
+
+        public void Stop()
+        {
+            if (!Active) return;
+            Active = false;
+            tick.Stop();
+            Hide();
+            m.OnLaserStopped();
+            TrimMemory();
+        }
+
+        void Step()
+        {
+            var p = Cursor.Position;
+            // A hand-held laser never sits perfectly still.
+            int jx = rnd.Next(-1, 2), jy = rnd.Next(-1, 2);
+            Present(buf, p.X - Size_ / 2 + jx, p.Y - Size_ / 2 + jy, Size_, Size_);
+            if (p != last) { last = p; lastMove = DateTime.Now; }
+            m.OnLaser(p);
+            var now = DateTime.Now;
+            if ((now - lastMove).TotalSeconds > 45 || (now - started).TotalMinutes > 5) Stop();
+        }
+    }
+
+    // A robot vacuum that now and then tours the desk and bumps into rugs.
+    public class RobotForm : LayeredWindow
+    {
+        readonly RugManager m;
+        readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
+        readonly Bitmap body, shadow;
+        readonly Random rnd = new Random();
+        float x, y, heading, time, turnBias;
+        bool leaving;
+        int[] buf;
+        const int Box = 170;
+        readonly Dictionary<RugForm, float> bumped = new Dictionary<RugForm, float>();
+        public bool Running { get; private set; }
+        public bool CatRiding { get; private set; }
+
+        public RobotForm(RugManager m)
+        {
+            this.m = m;
+            string p = Path.Combine(m.Dir, "robot.png");
+            if (File.Exists(p))
+                using (var sheet = new Bitmap(p))
+                {
+                    int c = sheet.Width;
+                    body = sheet.Clone(new Rectangle(0, 0, c, c), PixelFormat.Format32bppPArgb);
+                    shadow = sheet.Clone(new Rectangle(0, c, c, c), PixelFormat.Format32bppPArgb);
+                }
+            buf = new int[Box * Box];
+            tick.Interval = 16;
+            tick.Tick += delegate { Step(); };
+        }
+
+        float Radius { get { return 50; } }
+
+        public void Start(bool withCat)
+        {
+            if (body == null || Running) return;
+            var a = Screen.PrimaryScreen.WorkingArea;
+            // Roll in from a random edge, pointing inward.
+            int e = rnd.Next(4);
+            if (e == 0) { x = a.Left - Radius; y = a.Top + (float)rnd.NextDouble() * a.Height; heading = 0; }
+            else if (e == 1) { x = a.Right + Radius; y = a.Top + (float)rnd.NextDouble() * a.Height; heading = (float)Math.PI; }
+            else if (e == 2) { x = a.Left + (float)rnd.NextDouble() * a.Width; y = a.Top - Radius; heading = (float)Math.PI / 2; }
+            else { x = a.Left + (float)rnd.NextDouble() * a.Width; y = a.Bottom + Radius; heading = -(float)Math.PI / 2; }
+            heading += (float)(rnd.NextDouble() - 0.5) * 0.8f;
+            time = 0; leaving = false; turnBias = (float)(rnd.NextDouble() - 0.5) * 0.6f;
+            CatRiding = withCat && m.CatNapSprite != null;
+            bumped.Clear();
+            Running = true;
+            if (!Visible) Show();
+            tick.Start();
+        }
+
+        public void GoHome() { if (Running) leaving = true; }
+
+        void Step()
+        {
+            const float dt = 0.016f;
+            time += dt;
+            var a = Screen.PrimaryScreen.WorkingArea;
+            float speed = 85;
+            heading += turnBias * dt * 0.6f;
+            x += (float)Math.Cos(heading) * speed * dt;
+            y += (float)Math.Sin(heading) * speed * dt;
+            if (time > 50) leaving = true;
+
+            if (!leaving && time > 2)
+            {
+                // Bounce off the screen edges.
+                if ((x < a.Left + Radius && Math.Cos(heading) < 0) || (x > a.Right - Radius && Math.Cos(heading) > 0))
+                    heading = (float)Math.PI - heading + (float)(rnd.NextDouble() - 0.5) * 0.6f;
+                if ((y < a.Top + Radius && Math.Sin(heading) < 0) || (y > a.Bottom - Radius && Math.Sin(heading) > 0))
+                    heading = -heading + (float)(rnd.NextDouble() - 0.5) * 0.6f;
+            }
+
+            // Bump into rugs: knock the edge up, turn away.
+            foreach (var r in m.Rugs)
+            {
+                float last;
+                if (bumped.TryGetValue(r, out last) && time - last < 1.2f) continue;
+                float nx, ny;
+                if (r.RobotHit(x, y, Radius * 0.85f, out nx, out ny))
+                {
+                    bumped[r] = time;
+                    float dot = (float)(Math.Cos(heading) * nx + Math.Sin(heading) * ny);
+                    if (dot < 0)
+                    {
+                        float vx = (float)Math.Cos(heading) - 2 * dot * nx, vy = (float)Math.Sin(heading) - 2 * dot * ny;
+                        heading = (float)Math.Atan2(vy, vx) + (float)(rnd.NextDouble() - 0.5) * 0.5f;
+                    }
+                }
+            }
+
+            Array.Clear(buf, 0, buf.Length);
+            float deg = (float)(heading * 180 / Math.PI);
+            PaintBuffer(buf, Box, Box, g =>
+            {
+                float k = 0.8f;
+                DrawRotated(g, shadow, Box / 2f + 4, Box / 2f + 6, deg, k, null);
+                using (var ia = Tinted(1)) DrawRotated(g, body, Box / 2f, Box / 2f, deg, k, ia);
+                if (CatRiding)
+                {
+                    var cat = m.CatNapSprite; var cs = m.CatNapShadow;
+                    if (cat != null)
+                    {
+                        DrawRotated(g, cs, Box / 2f + 3, Box / 2f + 4, deg - 40, 0.62f, null);
+                        using (var ia = Tinted(1)) DrawRotated(g, cat, Box / 2f, Box / 2f, deg - 40, 0.62f, ia);
+                    }
+                }
+            });
+            Present(buf, (int)x - Box / 2, (int)y - Box / 2, Box, Box);
+
+            bool outside = x < a.Left - Radius * 1.5f || x > a.Right + Radius * 1.5f || y < a.Top - Radius * 1.5f || y > a.Bottom + Radius * 1.5f;
+            if (leaving && outside)
+            {
+                tick.Stop(); Running = false; CatRiding = false;
+                Hide();
+                TrimMemory();
+                return;
+            }
+            if (leaving)
+            {
+                // Head for the nearest edge.
+                float[] d = { x - a.Left, a.Right - x, y - a.Top, a.Bottom - y };
+                int best = 0; for (int i = 1; i < 4; i++) if (d[i] < d[best]) best = i;
+                float want = best == 0 ? (float)Math.PI : best == 1 ? 0 : best == 2 ? -(float)Math.PI / 2 : (float)Math.PI / 2;
+                float diff = want - heading;
+                while (diff > Math.PI) diff -= (float)(2 * Math.PI);
+                while (diff < -Math.PI) diff += (float)(2 * Math.PI);
+                heading += diff * dt * 2;
+            }
+        }
+    }
+
+    public class RugForm : LayeredWindow
+    {
+        public readonly int Id;
+        readonly RugManager m;
+        readonly string stateFile;
+        string design = "vintage";
+        Bitmap source;
+        string sourceKey;
+        Texture tex;
+        Cloth cloth;
+        readonly Renderer renderer = new Renderer();
+        float scale = 0.6f;
+        bool rotated, breeze;
+        readonly Dust dust = new Dust();
+        readonly Cat cat = new Cat();
+        readonly LostItems lost;
+        int lostDay = -1;
+        readonly System.Windows.Forms.Timer napTimer = new System.Windows.Forms.Timer();
+        bool simAwake, clothDirty = true;
+        int lastPad = -1;
+        int[] work;
+
+        readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer breezeTimer = new System.Windows.Forms.Timer();
+        readonly Random rnd = new Random();
+        int calmFrames, restlessFrames;
+        float grabOffX, grabOffY, mouseVX, mouseVY;
+        Point lastMouse;
+        bool forgotten;
+
+        public RugForm(RugManager m, int id)
+        {
+            this.m = m; Id = id;
+            stateFile = m.StateFile(id);
+            Text = "Windows Rug";
+            AllowDrop = true;
+            if (m.CatSheet != null) cat.LoadSprites(m.CatSheet);
+            renderer.TintR = m.TintR; renderer.TintG = m.TintG; renderer.TintB = m.TintB;
+            lost = new LostItems(m.ItemsSheet);
+            renderer.UnderLayer = (g, ox, oy) => lost.Draw(g, cloth, ox, oy, RugScale * 0.9f);
+            if (!LoadState()) { LoadSource(); Rebuild(float.NaN, float.NaN); }
+
+            tick.Interval = 15;
+            tick.Tick += delegate { Frame(); };
+            breezeTimer.Tick += delegate { Gust(); };
+            ScheduleBreeze();
+            napTimer.Tick += delegate { napTimer.Enabled = false; cat.EndNap(); if (!tick.Enabled) tick.Start(); };
+            ContextMenuStrip = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            ContextMenuStrip.Opening += delegate { BuildMenu(ContextMenuStrip); };
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Render();
+            Wake();
+        }
+
+        // ---- Design ----
+        string EffectiveDesign { get { string s = m.IsMainRug(this) ? m.SeasonalDesign : null; return s ?? design; } }
+
+        void LoadSource()
+        {
+            string key = EffectiveDesign;
+            if (key == sourceKey && source != null) return;
+            Bitmap b = null;
+            try { b = new Bitmap(m.DesignFile(key)); } catch { }
+            if (b == null) { try { b = new Bitmap(m.DesignFile("vintage")); } catch { b = new Bitmap(1016, 640); } }
+            // Pictures of any size become a rug about as big as the built-in ones.
+            float fit = 1016f / Math.Max(b.Width, b.Height * 1016f / 640f);
+            if (Math.Abs(fit - 1) > 0.01f)
+            {
+                var nb = new Bitmap(Math.Max(16, (int)(b.Width * fit)), Math.Max(16, (int)(b.Height * fit)), PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(nb)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(b, 0, 0, nb.Width, nb.Height); }
+                b.Dispose(); b = nb;
+            }
+            if (source != null) source.Dispose();
+            source = b; sourceKey = key;
+        }
+
+        Texture MakeTexture()
         {
             using (var src = (Bitmap)source.Clone())
             {
@@ -1248,16 +2105,75 @@ namespace WindowsRug
                         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                         g.DrawImage(src, 0, 0, w, h);
                     }
-                    tex = Texture.FromBitmap(scaled);
+                    return Texture.FromBitmap(scaled);
                 }
             }
+        }
+
+        void Rebuild(float cx, float cy)
+        {
+            tex = MakeTexture();
             var wa = Screen.PrimaryScreen.WorkingArea;
             if (float.IsNaN(cx)) { cx = wa.Left + wa.Width / 2f; cy = wa.Top + wa.Height / 2f; }
             renderer.CamX = wa.Left + wa.Width / 2f;
             renderer.CamY = wa.Top + wa.Height / 2f;
             int nx = Math.Max(8, (int)Math.Round(tex.W / 18f) + 1), ny = Math.Max(6, (int)Math.Round(tex.H / 18f) + 1);
             cloth = new Cloth(nx, ny, cx - tex.W / 2f, cy - tex.H / 2f, tex.W, tex.H);
+            lostDay = -1;
+            ScatterLost();
+            clothDirty = true;
         }
+
+        // Changes the picture; keeps the rug's shape when the size is unchanged.
+        void SetDesign(string key)
+        {
+            design = key;
+            Retexture();
+            SaveState();
+        }
+
+        void Retexture()
+        {
+            LoadSource();
+            var t = MakeTexture();
+            if (t.W == tex.W && t.H == tex.H) { tex = t; clothDirty = true; Render(); }
+            else { Rebuild(cloth.CenterX, cloth.CenterY); Wake(); }
+        }
+
+        void ScatterLost()
+        {
+            int day = DateTime.Now.DayOfYear + DateTime.Now.Year * 400;
+            if (day == lostDay) return;
+            lostDay = day;
+            lost.Scatter(cloth, day * 31 + Id);
+        }
+
+        public void OnClockChanged()
+        {
+            renderer.TintR = m.TintR; renderer.TintG = m.TintG; renderer.TintB = m.TintB;
+            ScatterLost();
+            if (EffectiveDesign != sourceKey) Retexture();
+            clothDirty = true;
+            Render();
+        }
+
+        public void PlaceNear(RugForm other)
+        {
+            if (other == null) return;
+            float dx = 80, dy = 70;
+            for (int i = 0; i < cloth.N; i++) { cloth.X[i] = cloth.PX[i] = other.cloth.CenterX + dx + cloth.X[i] - cloth.CenterX; }
+            for (int i = 0; i < cloth.N; i++) { cloth.Y[i] = cloth.PY[i] = other.cloth.CenterY + dy + cloth.Y[i] - cloth.CenterY; }
+            clothDirty = true;
+            Wake();
+        }
+
+        public void Forget()
+        {
+            forgotten = true;
+            try { File.Delete(stateFile); } catch { }
+        }
+
+        float RugScale { get { return tex.W / 610f; } }
 
         // ---- Main loop: runs only while the rug, the cat or the dust moves ----
         void Wake()
@@ -1265,8 +2181,6 @@ namespace WindowsRug
             simAwake = true; calmFrames = 0; restlessFrames = 0; cloth.Settling = 0;
             if (!tick.Enabled) tick.Start();
         }
-
-        float RugScale { get { return tex.W / 610f; } }
 
         void Frame()
         {
@@ -1296,9 +2210,8 @@ namespace WindowsRug
             {
                 tick.Stop();
                 // A napping cat is static; its timer wakes it when the nap is over.
-                if (cat.Napping) { catTimer.Interval = Math.Max(1000, (int)(cat.NapLeft * 1000)); catTimer.Enabled = true; }
-                GC.Collect();
-                try { SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1)); } catch { }
+                if (cat.Napping) { napTimer.Interval = Math.Max(1000, (int)(cat.NapLeft * 1000)); napTimer.Enabled = true; }
+                TrimMemory();
             }
         }
 
@@ -1333,7 +2246,7 @@ namespace WindowsRug
 
         void Render()
         {
-            if (!IsHandleCreated) return;
+            if (!IsHandleCreated || cloth == null) return;
             bool overlay = dust.Count > 0 || cat.Visible;
             renderer.Pad = overlay ? 44 : 16;
             if (clothDirty || renderer.Pad != lastPad)
@@ -1348,136 +2261,75 @@ namespace WindowsRug
                 // Cat and dust are drawn over a copy, so the rug itself isn't re-rendered.
                 if (work == null || work.Length < w * h) work = new int[renderer.Out.Length];
                 Array.Copy(renderer.Out, work, w * h);
-                var pin = GCHandle.Alloc(work, GCHandleType.Pinned);
-                try
+                PaintBuffer(work, w, h, g =>
                 {
-                    using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, pin.AddrOfPinnedObject()))
-                    using (var g = Graphics.FromImage(bmp))
-                    {
-                        g.SmoothingMode = SmoothingMode.AntiAlias;
-                        cat.Draw(g, cloth, renderer.OX, renderer.OY);
-                        dust.Draw(g, renderer.OX, renderer.OY);
-                    }
-                }
-                finally { pin.Free(); }
+                    cat.Draw(g, cloth, renderer.OX, renderer.OY);
+                    dust.Draw(g, renderer.OX, renderer.OY);
+                });
                 buf = work;
             }
-            IntPtr screenDc = GetDC(IntPtr.Zero);
-            if (w != dibW || h != dibH)
-            {
-                FreeDib();
-                memDc = CreateCompatibleDC(screenDc);
-                var bi = new BITMAPINFOHEADER { biSize = 40, biWidth = w, biHeight = -h, biPlanes = 1, biBitCount = 32 };
-                dib = CreateDIBSection(memDc, ref bi, 0, out dibBits, IntPtr.Zero, 0);
-                oldBmp = SelectObject(memDc, dib);
-                dibW = w; dibH = h;
-            }
-            Marshal.Copy(buf, 0, dibBits, w * h);
-            var size = new SIZE(w, h);
-            var src = new POINT(0, 0);
-            var dst = new POINT(renderer.OX, renderer.OY);
-            var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-            UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
-            ReleaseDC(IntPtr.Zero, screenDc);
+            Present(buf, renderer.OX, renderer.OY, w, h);
         }
 
         // ---- Cat ----
-        void ScheduleCat(bool soon)
-        {
-            catTimer.Interval = soon ? 45000 + rnd.Next(60000) : 180000 + rnd.Next(240000);
-            catTimer.Enabled = catOn;
-        }
+        public bool CatPresent { get { return cat.Present; } }
+        public bool CatChasing { get { return cat.Chasing; } }
+        public Bitmap CatNapSprite { get { return cat.NapSprite; } }
+        public Bitmap CatNapShadow { get { return cat.NapShadow; } }
 
-        void CatVisit()
+        public void CatVisit()
         {
-            if (cat.Napping) { cat.EndNap(); ScheduleCat(false); if (!tick.Enabled) tick.Start(); return; }
-            ScheduleCat(false);
-            if (!catOn || cloth.Grab >= 0 || cat.Present) return;
+            if (cloth.Grab >= 0 || cat.Present) return;
             cat.Visit(cloth, RugScale);
             Wake();
         }
 
-        // ---- Sweep icons under the rug ----
-        void SweepIcons()
-        {
-            IntPtr lv = DesktopIcons.FindListView();
-            if (lv == IntPtr.Zero) { Say("مش لاقي أيقونات سطح المكتب."); return; }
-            if (DesktopIcons.AutoArrange(lv))
-            {
-                Say("اقفل الترتيب التلقائي الأول: كليك يمين على سطح المكتب ← View ← شيل العلامة من Auto arrange icons، وبعدين جرب تاني.");
-                return;
-            }
-            var icons = DesktopIcons.Read(lv);
-            if (icons.Count == 0) return;
-            if (!File.Exists(iconsFile))
-            {
-                var lines = new List<string>();
-                foreach (var ic in icons) lines.Add(ic.Name + "\t" + ic.X + "\t" + ic.Y);
-                try { File.WriteAllLines(iconsFile, lines.ToArray(), System.Text.Encoding.UTF8); } catch { }
-            }
-            DesktopIcons.DisableSnap(lv);
+        public void ScareCat() { if (cat.Present) { cat.Flee(cloth); Wake(); } }
 
-            // Pack the icons in a grid inside the flat rug, following its rotation.
-            var sp = DesktopIcons.Spacing(lv);
+        void ToFlat(Point p, out float u, out float v)
+        {
             float cx, cy, cos, sin;
             cloth.FitFlat(out cx, out cy, out cos, out sin);
-            float uw = cloth.HalfW * 1.6f, vh = cloth.HalfH * 1.5f;
-            float cw = sp.Width * 0.8f, ch = sp.Height * 0.8f;
-            int cols = Math.Max(1, (int)(uw / cw));
-            int rows = (icons.Count + cols - 1) / cols;
-            if (rows * ch > vh) ch = vh / rows;
-            if (cols > icons.Count) { cols = icons.Count; }
-            for (int k = 0; k < icons.Count; k++)
-            {
-                float u = ((k % cols) - (cols - 1) / 2f) * cw, v = ((k / cols) - (rows - 1) / 2f) * ch;
-                var p = new Point((int)(cx + u * cos - v * sin - sp.Width / 2f), (int)(cy + u * sin + v * cos - sp.Height / 2f));
-                p = DesktopIcons.ToClient(lv, p);
-                DesktopIcons.Move(lv, k, p.X, p.Y);
-            }
-            // Lift the rug and drop it back over them.
-            cloth.BeginUnfold();
+            float dx = p.X - cx, dy = p.Y - cy;
+            u = dx * cos + dy * sin; v = -dx * sin + dy * cos;
+        }
+
+        public bool Contains(Point p, float margin)
+        {
+            float u, v; ToFlat(p, out u, out v);
+            return Math.Abs(u) < cloth.HalfW + margin && Math.Abs(v) < cloth.HalfH + margin;
+        }
+
+        public void ChaseLaser(Point p)
+        {
+            float u, v; ToFlat(p, out u, out v);
+            if (cat.Chasing) cat.SetChaseTarget(cloth, u, v);
+            else cat.StartChase(cloth, RugScale, u, v);
+            if (!tick.Enabled) tick.Start();
+        }
+
+        public void EndChase() { if (cat.Chasing) { cat.EndChase(cloth); if (!tick.Enabled) tick.Start(); } }
+
+        // ---- Robot ----
+        public bool RobotHit(float x, float y, float r, out float nx, out float ny)
+        {
+            nx = ny = 0;
+            float cx, cy, cos, sin;
+            cloth.FitFlat(out cx, out cy, out cos, out sin);
+            float dx = x - cx, dy = y - cy;
+            float u = dx * cos + dy * sin, v = -dx * sin + dy * cos;
+            float qu = Math.Max(-cloth.HalfW, Math.Min(cloth.HalfW, u)), qv = Math.Max(-cloth.HalfH, Math.Min(cloth.HalfH, v));
+            float du = u - qu, dv = v - qv, d = (float)Math.Sqrt(du * du + dv * dv);
+            if (d > r) return false;
+            if (d < 1e-3f) { du = u; dv = v; d = (float)Math.Sqrt(du * du + dv * dv) + 1e-3f; }
+            // Normal pointing away from the rug, back in screen space.
+            float lu = du / d, lv = dv / d;
+            nx = lu * cos - lv * sin; ny = lu * sin + lv * cos;
+            float hx = cx + qu * cos - qv * sin, hy = cy + qu * sin + qv * cos;
+            cloth.Poke(hx, hy, 70 * RugScale, 4.5f);
+            if (cat.Present && !cat.Hiding) cat.Flee(cloth);
             Wake();
-        }
-
-        void RestoreIcons()
-        {
-            IntPtr lv = DesktopIcons.FindListView();
-            if (lv == IntPtr.Zero || !File.Exists(iconsFile)) { Say("مفيش أيقونات متكنّسة ترجع."); return; }
-            var saved = new Dictionary<string, Point>();
-            try
-            {
-                foreach (var line in File.ReadAllLines(iconsFile, System.Text.Encoding.UTF8))
-                {
-                    var f = line.Split('\t');
-                    if (f.Length == 3 && !saved.ContainsKey(f[0])) saved[f[0]] = new Point(int.Parse(f[1]), int.Parse(f[2]));
-                }
-            }
-            catch { }
-            DesktopIcons.DisableSnap(lv);
-            var icons = DesktopIcons.Read(lv);
-            for (int k = 0; k < icons.Count; k++)
-            {
-                Point p;
-                if (saved.TryGetValue(icons[k].Name, out p)) DesktopIcons.Move(lv, k, p.X, p.Y);
-            }
-            try { File.Delete(iconsFile); } catch { }
-            cloth.BeginUnfold();
-            Wake();
-        }
-
-        static void Say(string text)
-        {
-            MessageBox.Show(text, "Windows Rug", MessageBoxButtons.OK, MessageBoxIcon.Information,
-                MessageBoxDefaultButton.Button1, MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
-        }
-
-        void FreeDib()
-        {
-            if (memDc == IntPtr.Zero) return;
-            SelectObject(memDc, oldBmp);
-            DeleteObject(dib);
-            DeleteDC(memDc);
-            memDc = IntPtr.Zero; dibW = dibH = 0;
+            return true;
         }
 
         // ---- Mouse ----
@@ -1492,9 +2344,9 @@ namespace WindowsRug
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
-            Point m = Cursor.Position;
-            if (cat.HitTest(m)) { cat.Flee(cloth); Wake(); return; }
-            int t = TriangleAt(m);
+            Point p = Cursor.Position;
+            if (cat.HitTest(p)) { cat.Flee(cloth); Wake(); return; }
+            int t = TriangleAt(p);
             if (t >= 0 && cat.Present) cat.Flee(cloth);     // grabbing the rug startles the cat
             if (t >= 0 && e.Clicks >= 2) { cloth.BeginUnfold(); Wake(); return; }
             cloth.CancelUnfold();
@@ -1506,14 +2358,14 @@ namespace WindowsRug
                 for (int di = 0; di <= 1; di++)
                 {
                     int k = (cj + dj) * cloth.NX + ci + di;
-                    float dx = cloth.X[k] - m.X, dy = cloth.Y[k] - m.Y, d = dx * dx + dy * dy;
+                    float dx = cloth.X[k] - p.X, dy = cloth.Y[k] - p.Y, d = dx * dx + dy * dy;
                     if (d < bestD) { bestD = d; best = k; }
                 }
             cloth.Grab = best;
-            grabOffX = cloth.X[best] - m.X; grabOffY = cloth.Y[best] - m.Y;
+            grabOffX = cloth.X[best] - p.X; grabOffY = cloth.Y[best] - p.Y;
             cloth.GrabX = cloth.X[best]; cloth.GrabY = cloth.Y[best]; cloth.GrabZ = cloth.Z[best];
             cloth.GrabLift = cloth.Z[best] + Math.Max(14f, Math.Min(tex.W, tex.H) * 0.08f);
-            lastMouse = m; mouseVX = mouseVY = 0;
+            lastMouse = p; mouseVX = mouseVY = 0;
             Capture = true;
             Wake();
         }
@@ -1521,16 +2373,18 @@ namespace WindowsRug
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            Point m = Cursor.Position;
+            Point p = Cursor.Position;
             if (cloth.Grab < 0)
             {
-                Cursor = TriangleAt(m) >= 0 ? Cursors.Hand : Cursors.Default;
+                // Stroking a napping cat.
+                if (cat.Napping && cat.HitTest(p)) { cat.Pet(); if (!tick.Enabled) tick.Start(); }
+                Cursor = cat.HitTest(p) ? Cursors.Hand : TriangleAt(p) >= 0 ? Cursors.Hand : Cursors.Default;
                 return;
             }
-            mouseVX = mouseVX * 0.5f + (m.X - lastMouse.X) * 0.5f;
-            mouseVY = mouseVY * 0.5f + (m.Y - lastMouse.Y) * 0.5f;
-            lastMouse = m;
-            cloth.GrabX = m.X + grabOffX; cloth.GrabY = m.Y + grabOffY;
+            mouseVX = mouseVX * 0.5f + (p.X - lastMouse.X) * 0.5f;
+            mouseVY = mouseVY * 0.5f + (p.Y - lastMouse.Y) * 0.5f;
+            lastMouse = p;
+            cloth.GrabX = p.X + grabOffX; cloth.GrabY = p.Y + grabOffY;
             Wake();
         }
 
@@ -1548,10 +2402,156 @@ namespace WindowsRug
             Wake();
         }
 
-        // ---- Menu ----
-        void BuildMenu()
+        // ---- Drop files on the rug to hide them under it ----
+        protected override void OnDragEnter(DragEventArgs e)
         {
-            var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            base.OnDragEnter(e);
+            // "Link" so Explorer never moves or deletes the file itself.
+            e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Link : DragDropEffects.None;
+        }
+
+        protected override void OnDragOver(DragEventArgs e)
+        {
+            base.OnDragOver(e);
+            e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Link : DragDropEffects.None;
+        }
+
+        protected override void OnDragDrop(DragEventArgs e)
+        {
+            base.OnDragDrop(e);
+            var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files == null || files.Length == 0) return;
+            IntPtr lv = DesktopIcons.FindListView();
+            if (lv == IntPtr.Zero || !CheckArrange(lv)) return;
+            string desk = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            var icons = DesktopIcons.Read(lv);
+            SaveIconPositions(icons, false);
+            DesktopIcons.DisableSnap(lv);
+            var sp = DesktopIcons.Spacing(lv);
+            Point drop = new Point(e.X, e.Y);
+            float cx, cy, cos, sin;
+            cloth.FitFlat(out cx, out cy, out cos, out sin);
+            float du, dv; ToFlat(drop, out du, out dv);
+            int placed = 0;
+            foreach (var f in files)
+            {
+                string dir = Path.GetDirectoryName(f) ?? "";
+                if (!string.Equals(dir.TrimEnd('\\'), desk.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(dir.TrimEnd('\\'), common.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) continue;
+                string full = Path.GetFileName(f), bare = Path.GetFileNameWithoutExtension(f);
+                for (int k = 0; k < icons.Count; k++)
+                {
+                    if (icons[k].Name != full && icons[k].Name != bare) continue;
+                    // Keep it well inside the rug, near where it was dropped.
+                    float u = Math.Max(-cloth.HalfW * 0.75f, Math.Min(cloth.HalfW * 0.75f, du + (placed % 3 - 1) * sp.Width * 0.5f));
+                    float v = Math.Max(-cloth.HalfH * 0.7f, Math.Min(cloth.HalfH * 0.7f, dv + (placed / 3) * sp.Height * 0.4f));
+                    var pt = new Point((int)(cx + u * cos - v * sin - sp.Width / 2f), (int)(cy + u * sin + v * cos - sp.Height / 2f));
+                    pt = DesktopIcons.ToClient(lv, pt);
+                    DesktopIcons.Move(lv, k, pt.X, pt.Y);
+                    placed++;
+                    break;
+                }
+            }
+            if (placed == 0) { Say("الحاجات اللي على سطح المكتب بس هي اللي تستخبى تحت السجادة."); return; }
+            // The rug flaps up where things were slipped under it.
+            cloth.Poke(drop.X, drop.Y, 120 * RugScale, 7);
+            Wake();
+        }
+
+        // ---- Sweep icons under the rug ----
+        bool CheckArrange(IntPtr lv)
+        {
+            if (!DesktopIcons.AutoArrange(lv)) return true;
+            Say("اقفل الترتيب التلقائي الأول: كليك يمين على سطح المكتب ← View ← شيل العلامة من Auto arrange icons، وبعدين جرب تاني.");
+            return false;
+        }
+
+        void SaveIconPositions(List<DesktopIcons.Icon> icons, bool replace)
+        {
+            var saved = LoadIconPositions();
+            if (replace) saved.Clear();
+            foreach (var ic in icons) if (!saved.ContainsKey(ic.Name)) saved[ic.Name] = new Point(ic.X, ic.Y);
+            var lines = new List<string>();
+            foreach (var kv in saved) lines.Add(kv.Key + "\t" + kv.Value.X + "\t" + kv.Value.Y);
+            try { File.WriteAllLines(m.IconsFile, lines.ToArray(), System.Text.Encoding.UTF8); } catch { }
+        }
+
+        Dictionary<string, Point> LoadIconPositions()
+        {
+            var saved = new Dictionary<string, Point>();
+            try
+            {
+                if (File.Exists(m.IconsFile))
+                    foreach (var line in File.ReadAllLines(m.IconsFile, System.Text.Encoding.UTF8))
+                    {
+                        var f = line.Split('\t');
+                        if (f.Length == 3 && !saved.ContainsKey(f[0])) saved[f[0]] = new Point(int.Parse(f[1]), int.Parse(f[2]));
+                    }
+            }
+            catch { }
+            return saved;
+        }
+
+        void SweepIcons()
+        {
+            IntPtr lv = DesktopIcons.FindListView();
+            if (lv == IntPtr.Zero) { Say("مش لاقي أيقونات سطح المكتب."); return; }
+            if (!CheckArrange(lv)) return;
+            var icons = DesktopIcons.Read(lv);
+            if (icons.Count == 0) return;
+            SaveIconPositions(icons, false);
+            DesktopIcons.DisableSnap(lv);
+
+            // Pack the icons in a grid inside the flat rug, following its rotation.
+            var sp = DesktopIcons.Spacing(lv);
+            float cx, cy, cos, sin;
+            cloth.FitFlat(out cx, out cy, out cos, out sin);
+            float uw = cloth.HalfW * 1.6f, vh = cloth.HalfH * 1.5f;
+            float cw = sp.Width * 0.8f, ch = sp.Height * 0.8f;
+            int cols = Math.Max(1, (int)(uw / cw));
+            int rows = (icons.Count + cols - 1) / cols;
+            if (rows * ch > vh) ch = vh / rows;
+            if (cols > icons.Count) cols = icons.Count;
+            for (int k = 0; k < icons.Count; k++)
+            {
+                float u = ((k % cols) - (cols - 1) / 2f) * cw, v = ((k / cols) - (rows - 1) / 2f) * ch;
+                var pt = new Point((int)(cx + u * cos - v * sin - sp.Width / 2f), (int)(cy + u * sin + v * cos - sp.Height / 2f));
+                pt = DesktopIcons.ToClient(lv, pt);
+                DesktopIcons.Move(lv, k, pt.X, pt.Y);
+            }
+            // Lift the rug and drop it back over them.
+            cloth.BeginUnfold();
+            Wake();
+        }
+
+        void RestoreIcons()
+        {
+            IntPtr lv = DesktopIcons.FindListView();
+            var saved = LoadIconPositions();
+            if (lv == IntPtr.Zero || saved.Count == 0) { Say("مفيش أيقونات متخبية ترجع."); return; }
+            DesktopIcons.DisableSnap(lv);
+            var icons = DesktopIcons.Read(lv);
+            for (int k = 0; k < icons.Count; k++)
+            {
+                Point pt;
+                if (saved.TryGetValue(icons[k].Name, out pt)) DesktopIcons.Move(lv, k, pt.X, pt.Y);
+            }
+            try { File.Delete(m.IconsFile); } catch { }
+            cloth.BeginUnfold();
+            Wake();
+        }
+
+        static void Say(string text)
+        {
+            MessageBox.Show(text, "Windows Rug", MessageBoxButtons.OK, MessageBoxIcon.Information,
+                MessageBoxDefaultButton.Button1, MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+        }
+
+        // ---- Menu (rebuilt each time it opens, so the ticks are current) ----
+        void BuildMenu(ContextMenuStrip menu)
+        {
+            menu.Items.Clear();
             menu.Items.Add("كنّس الأيقونات تحت السجادة", null, delegate { SweepIcons(); });
             menu.Items.Add("رجّع الأيقونات مكانها", null, delegate { RestoreIcons(); });
             menu.Items.Add(new ToolStripSeparator());
@@ -1559,20 +2559,69 @@ namespace WindowsRug
             menu.Items.Add("كبّر", null, delegate { ScaleRug(1.15f); });
             menu.Items.Add("صغّر", null, delegate { ScaleRug(1 / 1.15f); });
             menu.Items.Add("لف السجادة", null, delegate { rotated = !rotated; Rebuild(cloth.CenterX, cloth.CenterY); Wake(); });
-            var breezeItem = new ToolStripMenuItem("هوا خفيف") { CheckOnClick = true, Checked = breeze };
-            breezeItem.CheckedChanged += delegate { breeze = breezeItem.Checked; ScheduleBreeze(); SaveState(); };
-            menu.Items.Add(breezeItem);
-            var catItem = new ToolStripMenuItem("قطة") { CheckOnClick = true, Checked = catOn };
-            catItem.CheckedChanged += delegate
+
+            var designs = new ToolStripMenuItem("شكل السجادة");
+            for (int i = 0; i < RugManager.Designs.Length; i++)
             {
-                catOn = catItem.Checked;
-                if (catOn) { ScheduleCat(true); } else { catTimer.Enabled = false; cat.Flee(cloth); Wake(); }
-                SaveState();
-            };
-            menu.Items.Add(catItem);
+                string key = RugManager.Designs[i];
+                var it = new ToolStripMenuItem(RugManager.DesignNames[i]) { Checked = design == key };
+                it.Click += delegate { SetDesign(key); };
+                designs.DropDownItems.Add(it);
+            }
+            designs.DropDownItems.Add(new ToolStripSeparator());
+            var custom = new ToolStripMenuItem("صورة من جهازك…") { Checked = File.Exists(design) };
+            custom.Click += delegate { string f = PickImage("اختار صورة السجادة"); if (f != null) SetDesign(f); };
+            designs.DropDownItems.Add(custom);
+            if (m.SeasonalDesign != null && m.IsMainRug(this))
+                designs.DropDownItems.Add(new ToolStripMenuItem("(ثيم الموسم شغال دلوقتي)") { Enabled = false });
+            menu.Items.Add(designs);
+
+            var floors = new ToolStripMenuItem("الأرضية");
+            for (int i = 0; i < RugManager.Floors.Length; i++)
+            {
+                string key = RugManager.Floors[i];
+                var it = new ToolStripMenuItem(RugManager.FloorNames[i]) { Checked = m.S.Floor == key };
+                it.Click += delegate { m.S.Floor = key; m.S.Save(); m.ApplyWallpaper(true); };
+                floors.DropDownItems.Add(it);
+            }
+            floors.DropDownItems.Add(new ToolStripSeparator());
+            var floorImg = new ToolStripMenuItem("صورة من جهازك…") { Checked = File.Exists(m.S.Floor) };
+            floorImg.Click += delegate { string f = PickImage("اختار صورة الأرضية"); if (f != null) { m.S.Floor = f; m.S.Save(); m.ApplyWallpaper(true); } };
+            floors.DropDownItems.Add(floorImg);
+            var keep = new ToolStripMenuItem("سيب خلفية ويندوز بتاعتي") { Checked = m.S.Floor == "none" };
+            keep.Click += delegate { m.S.Floor = "none"; m.S.Save(); };
+            floors.DropDownItems.Add(keep);
+            menu.Items.Add(floors);
+
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("اقفل السجادة", null, delegate { SaveState(); Close(); });
-            ContextMenuStrip = menu;
+            menu.Items.Add("سجادة جديدة", null, delegate { m.AddRug(this); });
+            if (m.Rugs.Count > 1) menu.Items.Add("شيل السجادة دي", null, delegate { m.RemoveRug(this); });
+
+            menu.Items.Add(new ToolStripSeparator());
+            var laserItem = new ToolStripMenuItem(m.LaserActive ? "اقفل الليزر" : "ليزر للقطة") { ShortcutKeyDisplayString = "Ctrl+Alt+L" };
+            laserItem.Click += delegate { m.ToggleLaser(); };
+            menu.Items.Add(laserItem);
+            menu.Items.Add(Toggle("قطة", m.S.Cat, on => m.SetCat(on)));
+            menu.Items.Add(Toggle("مكنسة روبوت", m.S.Robot, on => m.SetRobot(on)));
+            if (m.S.Robot) menu.Items.Add("شغّل المكنسة دلوقتي", null, delegate { m.RunRobotNow(); });
+            menu.Items.Add(Toggle("هوا خفيف", breeze, on => { breeze = on; ScheduleBreeze(); SaveState(); }));
+            menu.Items.Add(Toggle("إضاءة النهار والليل", m.S.DayNight, on => { m.S.DayNight = on; m.S.Save(); m.UpdateClock(true); }));
+            menu.Items.Add(Toggle("ثيمات المواسم", m.S.Seasons, on => { m.S.Seasons = on; m.S.Save(); m.UpdateClock(true); }));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("اقفل السجادة", null, delegate { m.Quit(); });
+        }
+
+        static ToolStripMenuItem Toggle(string text, bool value, Action<bool> set)
+        {
+            var it = new ToolStripMenuItem(text) { Checked = value };
+            it.Click += delegate { set(!value); };
+            return it;
+        }
+
+        static string PickImage(string title)
+        {
+            using (var dlg = new OpenFileDialog { Title = title, Filter = "صور|*.png;*.jpg;*.jpeg;*.bmp;*.gif" })
+                return dlg.ShowDialog() == DialogResult.OK ? dlg.FileName : null;
         }
 
         void ScaleRug(float factor)
@@ -1598,19 +2647,21 @@ namespace WindowsRug
             try
             {
                 if (!File.Exists(stateFile)) return false;
-                var lines = File.ReadAllLines(stateFile);
+                var lines = File.ReadAllLines(stateFile, System.Text.Encoding.UTF8);
                 var inv = CultureInfo.InvariantCulture;
                 int nx = 0, ny = 0, p = 0;
                 for (; p < lines.Length; p++)
                 {
-                    var kv = lines[p].Split('=');
-                    if (kv.Length != 2) break;
-                    if (kv[0] == "scale") scale = float.Parse(kv[1], inv);
-                    else if (kv[0] == "rotated") rotated = kv[1] == "1";
-                    else if (kv[0] == "breeze") breeze = kv[1] == "1";
-                    else if (kv[0] == "cat") catOn = kv[1] == "1";
-                    else if (kv[0] == "grid") { var g = kv[1].Split('x'); nx = int.Parse(g[0]); ny = int.Parse(g[1]); }
+                    int eq = lines[p].IndexOf('=');
+                    if (eq < 0) break;
+                    string k = lines[p].Substring(0, eq), v = lines[p].Substring(eq + 1);
+                    if (k == "scale") scale = float.Parse(v, inv);
+                    else if (k == "rotated") rotated = v == "1";
+                    else if (k == "breeze") breeze = v == "1";
+                    else if (k == "design") design = v;
+                    else if (k == "grid") { var g = v.Split('x'); nx = int.Parse(g[0]); ny = int.Parse(g[1]); }
                 }
+                LoadSource();
                 Rebuild(float.NaN, float.NaN);
                 if (nx != cloth.NX || ny != cloth.NY || lines.Length - p < cloth.N) return true;
                 for (int i = 0; i < cloth.N; i++)
@@ -1627,18 +2678,19 @@ namespace WindowsRug
             catch { return false; }
         }
 
-        void SaveState()
+        public void SaveState()
         {
+            if (forgotten || cloth == null) return;
             try
             {
                 var inv = CultureInfo.InvariantCulture;
                 var lines = new List<string> {
-                    "scale=" + scale.ToString(inv), "rotated=" + (rotated ? "1" : "0"),
-                    "breeze=" + (breeze ? "1" : "0"), "cat=" + (catOn ? "1" : "0"), "grid=" + cloth.NX + "x" + cloth.NY,
+                    "design=" + design, "scale=" + scale.ToString(inv), "rotated=" + (rotated ? "1" : "0"),
+                    "breeze=" + (breeze ? "1" : "0"), "grid=" + cloth.NX + "x" + cloth.NY,
                 };
                 for (int i = 0; i < cloth.N; i++)
                     lines.Add(cloth.X[i].ToString("0.##", inv) + " " + cloth.Y[i].ToString("0.##", inv) + " " + cloth.Z[i].ToString("0.##", inv));
-                File.WriteAllLines(stateFile, lines.ToArray());
+                File.WriteAllLines(stateFile, lines.ToArray(), System.Text.Encoding.UTF8);
             }
             catch { }
         }
@@ -1647,8 +2699,7 @@ namespace WindowsRug
         {
             tick.Stop();
             breezeTimer.Stop();
-            catTimer.Stop();
-            FreeDib();
+            napTimer.Stop();
             base.OnFormClosed(e);
         }
     }

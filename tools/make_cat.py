@@ -246,8 +246,64 @@ def sleep_frame():
     return col, a
 
 
+def stretch_frame():
+    # Big stretch: front legs reaching forward, chest low, hips and tail up.
+    body = ellipsoid(-6, 0, 38, 18, 15)
+    hips = ellipsoid(-26, 0, 16, 18, 22)
+    chest = ellipsoid(14, 0, 16, 17, 11)
+    head = ellipsoid(36, 0, 13, 14, 12)
+    cheeks = ellipsoid(38, 0, 9.5, 16, 9)
+    muzzle = ellipsoid(46, 0, 5.5, 7, 9)
+    ear_l, in_l = ear(33, -9, 28, -20, 11, 13)
+    ear_r, in_r = ear(33, 9, 28, 20, 11, 13)
+    legs = [tube([(20, s * 9), (40, s * 11), (58, s * 10)], 4.5, 4.2) for s in (-1, 1)]
+    feet = [ellipsoid(60, s * 10, 5.5, 4.5, 6) for s in (-1, 1)]
+    tail_pts = [(-36 - t * 40, math.sin(t * 2.4) * 6) for t in [j / 8 for j in range(9)]]
+    tail = tube(tail_pts, 8.5, 10.5)
+    tail = np.where(tail > 0, tail + 6, tail)
+    h = smooth_union(body, hips, chest, head, cheeks, muzzle, ear_l, ear_r, tail, *(legs + feet))
+    belly = np.clip(1 - np.clip(h, 0, None) / 7, 0, 1) * 0.5 * (h > 0)
+    points = np.clip((-34 - X) / 14, 0, 1)
+    points = np.maximum(points, ((ear_l > 0) | (ear_r > 0)) * 0.85)
+    points = np.maximum(points, np.exp(-(((X - 42) / 5) ** 2 + ((np.abs(Y) - 6) / 4) ** 2)) * 0.7)
+    col, a = shade(h, blur(points.astype(np.float32), SS * 1.5), np.clip(belly, 0, 0.8),
+                   closed_eyes=[(42, -6, 2.6, 1.5708), (42, 6, 2.6, 1.5708)],
+                   nose=(50.5, 0, 1.5), ear_inner=in_l | in_r)
+    return col, a
+
+
+def belly_frame():
+    # Rolled onto its back: pale belly up, paws curled in the air, head tipped back.
+    body = ellipsoid(-4, 0, 34, 20, 16)
+    chest = ellipsoid(14, 0, 16, 18, 15)
+    head = ellipsoid(37, 3, 13.5, 14, 13)
+    cheeks = ellipsoid(39, 3, 9.5, 16, 10)
+    ear_l, in_l = ear(44, -8, 52, -16, 10, 10)
+    ear_r, in_r = ear(44, 12, 52, 20, 10, 10)
+    paws = []
+    for (px, py) in [(18, -15), (22, 13), (-22, -16), (-20, 15)]:
+        paws.append(tube([(px - 4, py * 0.6), (px, py), (px + 4, py * 1.05)], 4.8, 4.4))
+        paws.append(ellipsoid(px + 5, py * 1.08, 5.5, 5, 17))
+    paws = [np.where(p > 0, p + 5, p) for p in paws]
+    tail_pts = [(-36 - t * 30, math.sin(t * 3) * 14) for t in [j / 8 for j in range(9)]]
+    tail = tube(tail_pts, 8.5, 9.5)
+    h = smooth_union(body, chest, head, cheeks, ear_l, ear_r, tail, *paws)
+    # The belly is the palest part; points on the tail and ears.
+    belly = np.exp(-((X / 30) ** 2 + (Y / 13) ** 2)) * 0.0
+    points = np.clip((-34 - X) / 12, 0, 1)
+    points = np.maximum(points, ((ear_l > 0) | (ear_r > 0)) * 0.85)
+    points = np.maximum(points, np.exp(-(((X - 34) / 5) ** 2 + ((np.abs(Y - 3) - 6) / 4) ** 2)) * 0.7)
+    col, a = shade(h, blur(points.astype(np.float32), SS * 1.5), belly,
+                   eyes=[(33, -3, 2.2), (33, 9, 2.2)], nose=(28, 3, 1.5), ear_inner=in_l | in_r)
+    # Pink paw pads facing up.
+    for (px, py) in [(18, -15), (22, 13), (-22, -16), (-20, 15)]:
+        m = np.clip(1.4 - (((X - px - 5) / 2.6) ** 2 + ((Y - py * 1.08) / 2.6) ** 2), 0, 1)
+        col = col * (1 - m[..., None] * 0.7) + np.array([206, 140, 146])[None, None] * m[..., None] * 0.7
+    return col, a
+
+
 if __name__ == "__main__":
-    frames = [walk_frame(k) for k in range(8)] + [sleep_frame()]
+    frames = [walk_frame(k) for k in range(8)] + [sleep_frame(), stretch_frame(), belly_frame()]
     sheet = Image.new("RGBA", (CW * len(frames), CH * 2), (0, 0, 0, 0))
     for i, (col, a) in enumerate(frames):
         sheet.paste(to_cell(col, a), (i * CW, 0))
