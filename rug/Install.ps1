@@ -10,7 +10,7 @@ New-Item -ItemType Directory -Force -Path $dst | Out-Null
 foreach ($f in 'cat.png', 'items.png', 'robot.png', 'Uninstall.ps1', 'Uninstall.bat') {
     Copy-Item (Join-Path $src $f) $dst -Force
 }
-foreach ($d in 'rugs', 'floors') {
+foreach ($d in 'rugs', 'floors', 'furniture') {
     Copy-Item (Join-Path $src $d) $dst -Recurse -Force
 }
 Get-ChildItem $dst -Recurse -File | Unblock-File

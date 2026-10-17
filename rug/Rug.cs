@@ -19,6 +19,17 @@ namespace WindowsRug
 {
     public static class App
     {
+        public static void Log(Exception ex)
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsRug");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "error.log"), DateTime.Now.ToString("s") + "  " + ex + Environment.NewLine + Environment.NewLine);
+            }
+            catch { }
+        }
+
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
         [STAThread]
@@ -34,6 +45,10 @@ namespace WindowsRug
             {
                 if (!created) return;
                 try { SetProcessDPIAware(); } catch { }
+                // Never crash: log the error and keep going.
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += (s, e) => Log(e.Exception);
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => Log(e.ExceptionObject as Exception);
                 Application.EnableVisualStyles();
                 Application.Run(new RugManager(dir));
             }
@@ -155,6 +170,22 @@ namespace WindowsRug
             {
                 float ex = X[cb[c]] - X[ca[c]], ey = Y[cb[c]] - Y[ca[c]];
                 cr[c] = (float)Math.Sqrt(ex * ex + ey * ey);
+            }
+        }
+
+        // False when something has gone badly wrong (NaN, flung off into space).
+        public bool Healthy
+        {
+            get
+            {
+                var vs = SystemInformation.VirtualScreen;
+                for (int i = 0; i < N; i++)
+                {
+                    float x = X[i], y = Y[i], z = Z[i];
+                    if (float.IsNaN(x) || float.IsNaN(y) || float.IsNaN(z) || float.IsInfinity(x) || float.IsInfinity(y) || float.IsInfinity(z)) return false;
+                }
+                float cx = CenterX, cy = CenterY;
+                return cx > vs.Left - 200 && cx < vs.Right + 200 && cy > vs.Top - 200 && cy < vs.Bottom + 200;
             }
         }
 
@@ -448,6 +479,8 @@ namespace WindowsRug
         public float TintR = 1, TintG = 1, TintB = 1;   // time-of-day light colour
         // Drawn on the desk before the rug, so it only shows where the rug is lifted.
         public Action<Graphics, int, int> UnderLayer;
+        public List<RectangleF> Extra = new List<RectangleF>();   // more screen area to cover
+        public List<float[]> Lamps = new List<float[]>();         // x, y, radius, strength of lamps that are on
         float[] shadow, tmp, casterZ, depth;
         int capacity;
 
@@ -521,6 +554,11 @@ namespace WindowsRug
                     minY = Math.Min(minY, Math.Min(vy[k], syp)); maxY = Math.Max(maxY, Math.Max(vy[k], syp));
                 }
 
+            foreach (var r in Extra)
+            {
+                minX = Math.Min(minX, r.Left); maxX = Math.Max(maxX, r.Right);
+                minY = Math.Min(minY, r.Top); maxY = Math.Max(maxY, r.Bottom);
+            }
             int pad = Pad;
             OX = (int)Math.Floor(minX) - pad; OY = (int)Math.Floor(minY) - pad;
             W = ((int)Math.Ceiling(maxX) + pad - OX + 15) & ~15;
@@ -692,7 +730,15 @@ namespace WindowsRug
                         }
                     }
 
-                    sr *= light * TintR; sg *= light * TintG; sb *= light * TintB;
+                    float lr = TintR, lg = TintG, lb = TintB;
+                    for (int li = 0; li < Lamps.Count; li++)
+                    {
+                        var L = Lamps[li];
+                        float ddx = x + OX - L[0], ddy = y + OY - L[1];
+                        float f = L[3] * (float)Math.Exp(-(ddx * ddx + ddy * ddy) / (L[2] * L[2]));
+                        lr += f; lg += f * 0.82f; lb += f * 0.55f;
+                    }
+                    sr *= light * lr; sg *= light * lg; sb *= light * lb;
                     if (sr > sa) sr = sa; if (sg > sa) sg = sa; if (sb > sa) sb = sa;
 
                     if (sa > 128 && z > depth[idx]) depth[idx] = z;
@@ -1205,6 +1251,8 @@ namespace WindowsRug
         }
 
         public static Point ToClient(IntPtr lv, Point screen) { ScreenToClient(lv, ref screen); return screen; }
+        [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hWnd, ref Point p);
+        public static Point ToScreen(IntPtr lv, Point client) { ClientToScreen(lv, ref client); return client; }
     }
 
     // Shared plumbing for per-pixel-alpha windows: on the desktop layer (above the
@@ -1231,6 +1279,8 @@ namespace WindowsRug
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr hObject);
         [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("user32.dll")] static extern IntPtr FindWindow(string cls, string name);
+        [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string name);
+        [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll", EntryPoint = "SetWindowLong")] static extern int SetWindowLong32(IntPtr hWnd, int idx, int val);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")] static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int idx, IntPtr val);
@@ -1244,6 +1294,7 @@ namespace WindowsRug
         static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
 
         protected bool TopLayer;    // a click-through overlay above everything (the laser dot)
+        protected bool ClickThrough;   // passes clicks to whatever is below (lamp light)
 
         IntPtr memDc, dib, dibBits, oldBmp;
         int dibW, dibH;
@@ -1264,6 +1315,7 @@ namespace WindowsRug
                 var cp = base.CreateParams;
                 cp.ExStyle |= WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
                 if (TopLayer) cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOPMOST;
+                if (ClickThrough) cp.ExStyle |= WS_EX_TRANSPARENT;
                 return cp;
             }
         }
@@ -1282,21 +1334,49 @@ namespace WindowsRug
                 if (IntPtr.Size == 8) SetWindowLongPtr64(Handle, GWL_HWNDPARENT, progman);
                 else SetWindowLong32(Handle, GWL_HWNDPARENT, progman.ToInt32());
             }
-            SetWindowPos(Handle, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SendToBottom();
+        }
+
+        // The top-level window that holds the desktop icons (Progman, or a WorkerW).
+        static IntPtr DesktopHost()
+        {
+            IntPtr pm = FindWindow("Progman", null);
+            if (pm != IntPtr.Zero && FindWindowEx(pm, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero) return pm;
+            IntPtr w = IntPtr.Zero;
+            while ((w = FindWindowEx(IntPtr.Zero, w, "WorkerW", null)) != IntPtr.Zero)
+                if (FindWindowEx(w, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero) return w;
+            return pm;
+        }
+
+        // "As low as possible, but still above the desktop": never slip under the
+        // wallpaper, whatever the click or the Windows version does.
+        IntPtr LowestSpot()
+        {
+            const uint GW_HWNDPREV = 3;
+            IntPtr host = DesktopHost();
+            if (host == IntPtr.Zero) return HWND_BOTTOM;
+            IntPtr above = GetWindow(host, GW_HWNDPREV);
+            if (above == Handle) above = GetWindow(Handle, GW_HWNDPREV);   // already right there: stay
+            return above == IntPtr.Zero ? IntPtr.Zero /* HWND_TOP */ : above;
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_WINDOWPOSCHANGING && !TopLayer)
+            if (m.Msg == WM_WINDOWPOSCHANGING && !TopLayer && IsHandleCreated)
             {
                 var wp = (WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(WINDOWPOS));
                 if ((wp.flags & SWP_NOZORDER) == 0)
                 {
-                    wp.hwndInsertAfter = HWND_BOTTOM;
+                    wp.hwndInsertAfter = LowestSpot();
                     Marshal.StructureToPtr(wp, m.LParam, false);
                 }
             }
             base.WndProc(ref m);
+        }
+
+        public void SendToBottom()
+        {
+            if (IsHandleCreated && !TopLayer) SetWindowPos(Handle, LowestSpot(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         // Shows a premultiplied ARGB buffer at screen position (x, y).
@@ -1385,7 +1465,7 @@ namespace WindowsRug
     public class GlobalSettings
     {
         public string Floor = "oak";        // built-in floor name, an image path, or "none"
-        public bool DayNight = true, Seasons = true, Cat = true, Robot = true;
+        public bool DayNight = true, Seasons = true, Cat = true, Robot = true, RobotTidies = true;
         readonly string file;
 
         public GlobalSettings(string file) { this.file = file; }
@@ -1405,6 +1485,7 @@ namespace WindowsRug
                     else if (k == "seasons") Seasons = v == "1";
                     else if (k == "cat") Cat = v == "1";
                     else if (k == "robot") Robot = v == "1";
+                    else if (k == "robottidies") RobotTidies = v == "1";
                 }
             }
             catch { }
@@ -1416,21 +1497,30 @@ namespace WindowsRug
             {
                 File.WriteAllLines(file, new[] {
                     "floor=" + Floor, "daynight=" + (DayNight ? "1" : "0"), "seasons=" + (Seasons ? "1" : "0"),
-                    "cat=" + (Cat ? "1" : "0"), "robot=" + (Robot ? "1" : "0") }, System.Text.Encoding.UTF8);
+                    "cat=" + (Cat ? "1" : "0"), "robot=" + (Robot ? "1" : "0"), "robottidies=" + (RobotTidies ? "1" : "0") }, System.Text.Encoding.UTF8);
             }
             catch { }
         }
     }
 
-    // Things lost under the rug. They live in the rug's flat frame, so they are
-    // always underneath it and only show when a corner is lifted.
-    public class LostItems
+    // Something lost under a rug: a coin, a key, a lone sock... It lies on the
+    // floor in screen coordinates and stays put when the rug is dragged away.
+    public class LostItem
     {
-        struct Item { public int Kind; public float U, V, Angle; }
-        readonly List<Item> items = new List<Item>();
-        Bitmap[] sprites, shadows;
+        public int Kind;
+        public float X, Y, Angle, Scale;
+        public RugForm Owner;        // the rug drawing it (it's underneath), or null
+        public ItemForm Form;        // its own little window while it's out in the open
+        public RectangleF Bounds { get { float r = 36 * Scale; return new RectangleF(X - r, Y - r, r * 2, r * 2); } }
+    }
 
-        public LostItems(Bitmap sheet)
+    public class ItemSprites
+    {
+        public static readonly string[] Names = { "عملة", "مفتاح", "شراب لوحده", "زرار", "حتة بونبوني", "ورقة متكرمشة" };
+        readonly Bitmap[] sprites, shadows;
+        public int Count { get { return sprites == null ? 0 : sprites.Length; } }
+
+        public ItemSprites(Bitmap sheet)
         {
             if (sheet == null) return;
             int cell = sheet.Height / 2, n = sheet.Width / cell;
@@ -1442,34 +1532,44 @@ namespace WindowsRug
             }
         }
 
-        // A new handful every day.
-        public void Scatter(Cloth c, int seed)
+        public void Draw(Graphics g, LostItem it, float ox, float oy)
         {
-            items.Clear();
             if (sprites == null) return;
-            var r = new Random(seed);
-            int n = 2 + r.Next(3);
-            for (int i = 0; i < n; i++)
-                items.Add(new Item {
-                    Kind = r.Next(sprites.Length),
-                    U = (float)(r.NextDouble() * 2 - 1) * c.HalfW * 0.85f,
-                    V = (float)(r.NextDouble() * 2 - 1) * c.HalfH * 0.8f,
-                    Angle = (float)(r.NextDouble() * 360) });
+            float k = it.Scale;
+            LayeredWindow.DrawRotated(g, shadows[it.Kind], it.X - ox + 2 * k, it.Y - oy + 3 * k, it.Angle, k, null);
+            using (var ia = LayeredWindow.Tinted(1)) LayeredWindow.DrawRotated(g, sprites[it.Kind], it.X - ox, it.Y - oy, it.Angle, k, ia);
+        }
+    }
+
+    // A found item lying in the open. Click it to pick it up.
+    public class ItemForm : LayeredWindow
+    {
+        readonly RugManager m;
+        readonly LostItem item;
+        int[] buf;
+        int size;
+
+        public ItemForm(RugManager m, LostItem item)
+        {
+            this.m = m; this.item = item;
+            Cursor = Cursors.Hand;
         }
 
-        public void Draw(Graphics g, Cloth c, int ox, int oy, float k)
+        public void Redraw()
         {
-            if (sprites == null || items.Count == 0) return;
-            float cx, cy, cos, sin;
-            c.FitFlat(out cx, out cy, out cos, out sin);
-            float rugDeg = (float)(Math.Atan2(sin, cos) * 180 / Math.PI);
-            using (var ia = LayeredWindow.Tinted(1))
-                foreach (var it in items)
-                {
-                    float x = cx + it.U * cos - it.V * sin - ox, y = cy + it.U * sin + it.V * cos - oy;
-                    LayeredWindow.DrawRotated(g, shadows[it.Kind], x + 2 * k, y + 3 * k, rugDeg + it.Angle, k, null);
-                    LayeredWindow.DrawRotated(g, sprites[it.Kind], x, y, rugDeg + it.Angle, k, ia);
-                }
+            size = ((int)(item.Bounds.Width) + 8 + 3) & ~3;
+            if (buf == null || buf.Length != size * size) buf = new int[size * size]; else Array.Clear(buf, 0, buf.Length);
+            float ox = item.X - size / 2f, oy = item.Y - size / 2f;
+            PaintBuffer(buf, size, size, g => m.Sprites.Draw(g, item, ox, oy));
+            Present(buf, (int)ox, (int)oy, size, size);
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Redraw(); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left) m.CollectItem(item);
         }
     }
 
@@ -1509,6 +1609,8 @@ namespace WindowsRug
             S.Load();
             string p = Path.Combine(dir, "cat.png"); if (File.Exists(p)) CatSheet = new Bitmap(p);
             p = Path.Combine(dir, "items.png"); if (File.Exists(p)) ItemsSheet = new Bitmap(p);
+            Sprites = new ItemSprites(ItemsSheet);
+            LoadItems();
 
             UpdateClock(true);
 
@@ -1528,22 +1630,166 @@ namespace WindowsRug
             ids.Sort();
             if (ids.Count == 0) ids.Add(1);
             foreach (int id in ids) OpenRug(id);
+            ScatterItemsIfNewDay();
+            ReassignItems();
 
             robot = new RobotForm(this);
+            LoadFurniture();
             laser = new LaserForm(this);
             hotkey = new HotkeyWindow(ToggleLaser);
+            hotkey.OnRecall = RecallRugs;
+            BuildTray();
 
             catTimer.Tick += delegate { CatTick(); };
             ScheduleCat(true);
             robotTimer.Tick += delegate { RobotTick(); };
             ScheduleRobot(true);
             clockTimer.Interval = 5 * 60 * 1000;
-            clockTimer.Tick += delegate { UpdateClock(false); };
+            clockTimer.Tick += delegate { UpdateClock(false); ScatterItemsIfNewDay(); };
             clockTimer.Start();
         }
 
         public string StateFile(int id) { return Path.Combine(AppData, "state-" + id + ".txt"); }
+
+        // ---- Lost items ----
+        public ItemSprites Sprites;
+        public readonly List<LostItem> Items = new List<LostItem>();
+        int itemsDay = -1;
+        string ItemsFile { get { return Path.Combine(AppData, "items.txt"); } }
+        static int Today { get { return DateTime.Now.Year * 400 + DateTime.Now.DayOfYear; } }
+
+        void LoadItems()
+        {
+            try
+            {
+                if (!File.Exists(ItemsFile)) return;
+                var lines = File.ReadAllLines(ItemsFile);
+                var inv = CultureInfo.InvariantCulture;
+                itemsDay = int.Parse(lines[0]);
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    var f = lines[i].Split(' ');
+                    if (f.Length != 5) continue;
+                    Items.Add(new LostItem { Kind = int.Parse(f[0]) % Math.Max(1, Sprites.Count), X = float.Parse(f[1], inv), Y = float.Parse(f[2], inv),
+                                             Angle = float.Parse(f[3], inv), Scale = float.Parse(f[4], inv) });
+                }
+            }
+            catch { Items.Clear(); itemsDay = -1; }
+        }
+
+        public void SaveItems()
+        {
+            try
+            {
+                var inv = CultureInfo.InvariantCulture;
+                var lines = new List<string> { itemsDay.ToString() };
+                foreach (var it in Items)
+                    lines.Add(it.Kind + " " + it.X.ToString("0.#", inv) + " " + it.Y.ToString("0.#", inv) + " " + it.Angle.ToString("0", inv) + " " + it.Scale.ToString("0.###", inv));
+                File.WriteAllLines(ItemsFile, lines.ToArray());
+            }
+            catch { }
+        }
+
+        // A fresh handful under the rugs every day.
+        void ScatterItemsIfNewDay()
+        {
+            if (itemsDay == Today || Sprites.Count == 0) return;
+            foreach (var it in Items) if (it.Form != null) it.Form.Close();
+            Items.Clear();
+            itemsDay = Today;
+            foreach (var r in Rugs)
+            {
+                int n = 2 + Rnd.Next(3);
+                for (int i = 0; i < n; i++)
+                {
+                    var p = r.RandomInside(Rnd);
+                    Items.Add(new LostItem { Kind = Rnd.Next(Sprites.Count), X = p.X, Y = p.Y, Angle = Rnd.Next(360), Scale = r.ItemScale });
+                }
+            }
+            SaveItems();
+            ReassignItems();
+        }
+
+        // Each item is drawn by the rug lying over it, or by its own window when uncovered.
+        public void ReassignItems()
+        {
+            foreach (var it in Items)
+            {
+                RugForm owner = null;
+                foreach (var r in Rugs) if (r.ContainsFlat(new Point((int)it.X, (int)it.Y), -8)) { owner = r; break; }
+                if (owner != it.Owner)
+                {
+                    if (it.Owner != null) it.Owner.ItemsChanged();
+                    it.Owner = owner;
+                    if (owner != null) owner.ItemsChanged();
+                }
+                if (owner == null && it.Form == null) { it.Form = new ItemForm(this, it); it.Form.Show(); Restack(); }
+                else if (owner != null && it.Form != null) { it.Form.Close(); it.Form = null; }
+            }
+        }
+
+        public void DrawItemsUnder(RugForm r, Graphics g, int ox, int oy)
+        {
+            foreach (var it in Items) if (it.Owner == r) Sprites.Draw(g, it, ox, oy);
+        }
+
+        public void ItemRectsFor(RugForm r, List<RectangleF> into)
+        {
+            into.Clear();
+            foreach (var it in Items) if (it.Owner == r) into.Add(it.Bounds);
+        }
+
+        public void CollectItem(LostItem it)
+        {
+            RemoveItem(it);
+            if (tray != null) tray.ShowBalloonTip(2500, "لقيت حاجة تحت السجادة!", ItemSprites.Names[it.Kind % ItemSprites.Names.Length] + " 🎉", ToolTipIcon.None);
+        }
+
+        void RemoveItem(LostItem it)
+        {
+            Items.Remove(it);
+            if (it.Form != null) { it.Form.Close(); it.Form = null; }
+            if (it.Owner != null) it.Owner.ItemsChanged();
+            SaveItems();
+        }
+
+        // The robot vacuum swallows anything small lying in the open.
+        public void Vacuum(float x, float y, float r)
+        {
+            foreach (var it in Items.ToArray())
+                if (it.Owner == null && (it.X - x) * (it.X - x) + (it.Y - y) * (it.Y - y) < r * r) RemoveItem(it);
+        }
+
         public string IconsFile { get { return Path.Combine(AppData, "icons.txt"); } }
+
+        // Where each desktop icon was before we tucked it away, so it can go back.
+        public void SaveIconPositions(List<DesktopIcons.Icon> icons, bool replace)
+        {
+            var saved = LoadIconPositions();
+            if (replace) saved.Clear();
+            foreach (var ic in icons) if (!saved.ContainsKey(ic.Name)) saved[ic.Name] = new Point(ic.X, ic.Y);
+            var lines = new List<string>();
+            foreach (var kv in saved) lines.Add(kv.Key + "\t" + kv.Value.X + "\t" + kv.Value.Y);
+            try { File.WriteAllLines(IconsFile, lines.ToArray(), System.Text.Encoding.UTF8); } catch { }
+        }
+
+        public Dictionary<string, Point> LoadIconPositions()
+        {
+            var saved = new Dictionary<string, Point>();
+            try
+            {
+                if (File.Exists(IconsFile))
+                    foreach (var line in File.ReadAllLines(IconsFile, System.Text.Encoding.UTF8))
+                    {
+                        var f = line.Split('\t');
+                        if (f.Length == 3 && !saved.ContainsKey(f[0])) saved[f[0]] = new Point(int.Parse(f[1]), int.Parse(f[2]));
+                    }
+            }
+            catch { }
+            return saved;
+        }
+
+
 
         RugForm OpenRug(int id)
         {
@@ -1560,6 +1806,8 @@ namespace WindowsRug
             foreach (var r in Rugs) id = Math.Max(id, r.Id + 1);
             var nr = OpenRug(id);
             nr.PlaceNear(near);
+            Restack();
+            UpdateLights();
         }
 
         public void RemoveRug(RugForm r)
@@ -1577,7 +1825,145 @@ namespace WindowsRug
             quitting = true;
             foreach (var r in Rugs.ToArray()) { r.SaveState(); r.Close(); }
             hotkey.Dispose();
+            if (tray != null) { tray.Visible = false; tray.Dispose(); }
             ExitThread();
+        }
+
+        // ---- Living room ----
+        public readonly List<FurnitureForm> Furniture = new List<FurnitureForm>();
+        readonly Dictionary<FurnitureForm, GlowForm> glows = new Dictionary<FurnitureForm, GlowForm>();
+        string FurnitureFile { get { return Path.Combine(AppData, "furniture.txt"); } }
+
+        void LoadFurniture()
+        {
+            var inv = CultureInfo.InvariantCulture;
+            if (!File.Exists(FurnitureFile))
+            {
+                // First time: a corner sofa at the bottom right with a table, a lamp and a plant.
+                var a = Screen.PrimaryScreen.WorkingArea;
+                float k = Math.Max(0.7f, Math.Min(1.6f, a.Height / 1040f));
+                float sx = a.Right - 310 * k, sy = a.Bottom - 225 * k;
+                AddFurniture("sofa", sx, sy, 0, false);
+                AddFurniture("table", sx - 70 * k, sy - 270 * k, 0, false);
+                AddFurniture("lamp", sx - 360 * k, sy + 120 * k, 0, true);
+                AddFurniture("plant", a.Right - 130 * k, a.Top + 140 * k, 0, false);
+                SaveFurniture();
+                return;
+            }
+            try
+            {
+                foreach (var line in File.ReadAllLines(FurnitureFile))
+                {
+                    var f = line.Split(' ');
+                    if (f.Length != 5) continue;
+                    AddFurniture(f[0], float.Parse(f[1], inv), float.Parse(f[2], inv), int.Parse(f[3]), f[4] == "1");
+                }
+            }
+            catch { }
+        }
+
+        public void SaveFurniture()
+        {
+            var inv = CultureInfo.InvariantCulture;
+            var lines = new List<string>();
+            foreach (var f in Furniture) { float fx = f.X, fy = f.Y; lines.Add(f.Kind + " " + fx.ToString("0", inv) + " " + fy.ToString("0", inv) + " " + f.Rot + " " + (f.On ? "1" : "0")); }
+            try { File.WriteAllLines(FurnitureFile, lines.ToArray()); } catch { }
+        }
+
+        public FurnitureForm AddFurniture(string kind, float x, float y, int rot, bool on)
+        {
+            var f = new FurnitureForm(this, kind) { X = x, Y = y, Rot = rot, On = on };
+            Furniture.Add(f);
+            f.Show();
+            Restack();
+            UpdateLights();
+            return f;
+        }
+
+        public void RemoveFurniture(FurnitureForm f)
+        {
+            Furniture.Remove(f);
+            GlowForm g;
+            if (glows.TryGetValue(f, out g)) { g.Close(); glows.Remove(f); }
+            f.Close();
+            SaveFurniture();
+            UpdateLights();
+        }
+
+        public bool HasFurniture(string kind) { foreach (var f in Furniture) if (f.Kind == kind) return true; return false; }
+
+        public void ToggleFurniture(string kind)
+        {
+            foreach (var f in Furniture.ToArray()) if (f.Kind == kind) { RemoveFurniture(f); return; }
+            var a = Screen.PrimaryScreen.WorkingArea;
+            AddFurniture(kind, a.Left + a.Width / 2f + Rnd.Next(-200, 200), a.Top + a.Height / 2f + Rnd.Next(-150, 150), 0, kind == "lamp");
+            SaveFurniture();
+        }
+
+        public void FurnitureChanged(FurnitureForm f) { SaveFurniture(); UpdateLights(); }
+
+        public void FurnitureMoving(FurnitureForm f) { UpdateLights(); }
+
+        // Lamps light the floor (a glow window) and every rug's cloth.
+        float LampStrength { get { float b = (TintR + TintG + TintB) / 3; return 0.12f + 0.75f * (1 - b); } }
+
+        public void UpdateLights()
+        {
+            var lights = new List<float[]>();
+            foreach (var f in Furniture)
+            {
+                GlowForm g;
+                glows.TryGetValue(f, out g);
+                if (f.Kind == "lamp" && f.On)
+                {
+                    float radius = 380 * f.PieceScale;
+                    lights.Add(new[] { f.X, f.Y, radius * 0.6f, LampStrength * 1.2f });
+                    if (g == null) { g = new GlowForm(); glows[f] = g; g.Draw(f.X, f.Y, radius, LampStrength); Restack(); }
+                    else g.Draw(f.X, f.Y, radius, LampStrength);
+                }
+                else if (g != null) { g.Close(); glows.Remove(f); }
+            }
+            foreach (var r in Rugs) r.SetLamps(lights);
+        }
+
+        // Keeps the desk layers in order: furniture, robot, rugs, lost items, lamp light.
+        public void Restack()
+        {
+            foreach (var f in Furniture) f.SendToBottom();
+            if (robot != null) robot.SendToBottom();
+            foreach (var r in Rugs) r.SendToBottom();
+            foreach (var it in Items) if (it.Form != null) it.Form.SendToBottom();
+            foreach (var g in glows.Values) g.SendToBottom();
+        }
+
+        // ---- Tray icon: always a way back to the rugs ----
+        NotifyIcon tray;
+
+        void BuildTray()
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.FillRectangle(new SolidBrush(Color.FromArgb(38, 48, 72)), 1, 3, 14, 10);
+                g.FillRectangle(new SolidBrush(Color.FromArgb(178, 183, 190)), 3, 5, 10, 6);
+                g.FillEllipse(new SolidBrush(Color.FromArgb(222, 216, 204)), 6, 6, 4, 4);
+            }
+            var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            menu.Items.Add("رجّع السجاد قدامي (Ctrl+Alt+R)", null, delegate { RecallRugs(); });
+            menu.Items.Add("سجادة جديدة", null, delegate { AddRug(Rugs.Count > 0 ? Rugs[0] : null); });
+            menu.Items.Add("ليزر للقطة (Ctrl+Alt+L)", null, delegate { ToggleLaser(); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("اقفل السجادة", null, delegate { Quit(); });
+            tray = new NotifyIcon { Icon = Icon.FromHandle(bmp.GetHicon()), Text = "Windows Rug", ContextMenuStrip = menu, Visible = true };
+            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) RecallRugs(); };
+        }
+
+        public void RecallRugs()
+        {
+            if (Rugs.Count == 0) { OpenRug(1); return; }
+            int k = 0;
+            foreach (var r in Rugs) r.Recall(k++);
         }
 
         public bool IsMainRug(RugForm r) { return Rugs.Count > 0 && Rugs[0] == r; }
@@ -1630,6 +2016,9 @@ namespace WindowsRug
             if (!changed) return;
             ApplyWallpaper(false);
             foreach (var rug in Rugs) rug.OnClockChanged();
+            foreach (var it in Items) if (it.Form != null) it.Form.Redraw();
+            foreach (var f in Furniture) f.Redraw();
+            UpdateLights();
         }
 
         public void ApplyWallpaper(bool force)
@@ -1784,6 +2173,7 @@ namespace WindowsRug
     // Ctrl+Alt+L anywhere toggles the laser pointer.
     public class HotkeyWindow : NativeWindow, IDisposable
     {
+        public Action OnRecall;
         [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
         [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
         readonly Action onHotkey;
@@ -1793,11 +2183,13 @@ namespace WindowsRug
             this.onHotkey = onHotkey;
             CreateHandle(new CreateParams());
             RegisterHotKey(Handle, 1, 0x1 | 0x2 | 0x4000, (uint)Keys.L);   // Alt + Ctrl, no repeat
+            RegisterHotKey(Handle, 2, 0x1 | 0x2 | 0x4000, (uint)Keys.R);
         }
 
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x312 && m.WParam.ToInt32() == 1) onHotkey();
+            if (m.Msg == 0x312 && m.WParam.ToInt32() == 2 && OnRecall != null) OnRecall();
             base.WndProc(ref m);
         }
 
@@ -1805,6 +2197,7 @@ namespace WindowsRug
         {
             if (Handle == IntPtr.Zero) return;
             UnregisterHotKey(Handle, 1);
+            UnregisterHotKey(Handle, 2);
             DestroyHandle();
         }
     }
@@ -1891,6 +2284,72 @@ namespace WindowsRug
         const int Box = 170;
         readonly Dictionary<RugForm, float> bumped = new Dictionary<RugForm, float>();
         public bool Running { get; private set; }
+
+        // Tidying: desktop icons it picks up and pushes under a rug.
+        IntPtr lv;
+        Size sp;
+        readonly List<int> todo = new List<int>();
+        readonly Dictionary<int, Point> iconAt = new Dictionary<int, Point>();   // screen centres
+        int carrying = -1;
+        RugForm dropRug;
+        PointF dropAt, slideFrom;
+        float slideT = -1, chaseTime;
+
+        void PlanTidy()
+        {
+            todo.Clear(); iconAt.Clear(); carrying = -1; slideT = -1;
+            if (!m.S.RobotTidies || m.Rugs.Count == 0) return;
+            lv = DesktopIcons.FindListView();
+            if (lv == IntPtr.Zero || DesktopIcons.AutoArrange(lv)) return;
+            var icons = DesktopIcons.Read(lv);
+            if (icons.Count == 0) return;
+            sp = DesktopIcons.Spacing(lv);
+            var cands = new List<int>();
+            for (int k = 0; k < icons.Count; k++)
+            {
+                var c = DesktopIcons.ToScreen(lv, new Point(icons[k].X + sp.Width / 2, icons[k].Y + sp.Height / 2));
+                bool hidden = false;
+                foreach (var r in m.Rugs) if (r.ContainsFlat(c, 0)) { hidden = true; break; }
+                if (hidden) continue;
+                iconAt[k] = c; cands.Add(k);
+            }
+            if (cands.Count == 0) return;
+            m.SaveIconPositions(icons, false);
+            DesktopIcons.DisableSnap(lv);
+            // Nearest first, a few per trip.
+            float sx = x, sy = y;
+            while (cands.Count > 0 && todo.Count < 4)
+            {
+                int best = 0; float bd = float.MaxValue;
+                for (int i = 0; i < cands.Count; i++)
+                {
+                    var c = iconAt[cands[i]];
+                    float d = (c.X - sx) * (c.X - sx) + (c.Y - sy) * (c.Y - sy);
+                    if (d < bd) { bd = d; best = i; }
+                }
+                todo.Add(cands[best]); sx = iconAt[cands[best]].X; sy = iconAt[cands[best]].Y;
+                cands.RemoveAt(best);
+            }
+            chaseTime = 0;
+        }
+
+        void MoveIcon(int k, float cx, float cy)
+        {
+            var p = DesktopIcons.ToClient(lv, new Point((int)(cx - sp.Width / 2f), (int)(cy - sp.Height / 2f)));
+            DesktopIcons.Move(lv, k, p.X, p.Y);
+        }
+
+        RugForm NearestRug()
+        {
+            RugForm best = null; float bd = float.MaxValue;
+            foreach (var r in m.Rugs)
+            {
+                var c = r.Center;
+                float d = (c.X - x) * (c.X - x) + (c.Y - y) * (c.Y - y);
+                if (d < bd) { bd = d; best = r; }
+            }
+            return best;
+        }
         public bool CatRiding { get; private set; }
 
         public RobotForm(RugManager m)
@@ -1925,8 +2384,9 @@ namespace WindowsRug
             time = 0; leaving = false; turnBias = (float)(rnd.NextDouble() - 0.5) * 0.6f;
             CatRiding = withCat && m.CatNapSprite != null;
             bumped.Clear();
+            PlanTidy();
             Running = true;
-            if (!Visible) Show();
+            if (!Visible) { Show(); m.Restack(); }
             tick.Start();
         }
 
@@ -1938,18 +2398,77 @@ namespace WindowsRug
             time += dt;
             var a = Screen.PrimaryScreen.WorkingArea;
             float speed = 85;
-            heading += turnBias * dt * 0.6f;
+
+            // Slide the carried icon from the robot to its spot under the rug.
+            if (slideT >= 0)
+            {
+                slideT = Math.Min(1, slideT + dt / 0.45f);
+                float e = slideT * slideT * (3 - 2 * slideT);
+                MoveIcon(carrying, slideFrom.X + (dropAt.X - slideFrom.X) * e, slideFrom.Y + (dropAt.Y - slideFrom.Y) * e);
+                if (slideT >= 1) { slideT = -1; carrying = -1; chaseTime = 0; }
+            }
+
+            // Steer toward the next icon, or toward the rug with the one it carries.
+            bool steering = false;
+            PointF target = PointF.Empty;
+            if (!leaving && carrying >= 0 && slideT < 0 && dropRug != null && !dropRug.IsDisposed) { target = dropRug.Center; steering = true; }
+            else if (!leaving && carrying < 0 && slideT < 0 && todo.Count > 0) { var c = iconAt[todo[0]]; target = new PointF(c.X, c.Y); steering = true; }
+            if (steering)
+            {
+                speed = 110;
+                chaseTime += dt;
+                float want = (float)Math.Atan2(target.Y - y, target.X - x), diff = want - heading;
+                while (diff > Math.PI) diff -= (float)(2 * Math.PI);
+                while (diff < -Math.PI) diff += (float)(2 * Math.PI);
+                heading += Math.Max(-2.5f * dt, Math.Min(2.5f * dt, diff));
+                if (carrying < 0 && todo.Count > 0)
+                {
+                    float d = (target.X - x) * (target.X - x) + (target.Y - y) * (target.Y - y);
+                    if (d < 18 * 18)
+                    {
+                        carrying = todo[0]; todo.RemoveAt(0);
+                        dropRug = NearestRug();
+                        dropAt = dropRug != null ? dropRug.RandomInside(rnd) : new PointF(x, y);
+                        chaseTime = 0;
+                    }
+                    else if (chaseTime > 15) { todo.RemoveAt(0); chaseTime = 0; }   // can't reach it; skip
+                }
+            }
+            else heading += turnBias * dt * 0.6f;
             x += (float)Math.Cos(heading) * speed * dt;
             y += (float)Math.Sin(heading) * speed * dt;
-            if (time > 50) leaving = true;
+            if (carrying >= 0 && slideT < 0) MoveIcon(carrying, x, y);   // riding along under the robot
+            m.Vacuum(x, y, Radius * 0.7f);
 
-            if (!leaving && time > 2)
+            bool busy = todo.Count > 0 || carrying >= 0;
+            if ((time > 50 && !busy) || time > 150)
+            {
+                if (carrying >= 0) { MoveIcon(carrying, dropAt.X, dropAt.Y); carrying = -1; slideT = -1; }
+                todo.Clear();
+                leaving = true;
+            }
+
+            if (!leaving && time > 2 && !steering)
             {
                 // Bounce off the screen edges.
                 if ((x < a.Left + Radius && Math.Cos(heading) < 0) || (x > a.Right - Radius && Math.Cos(heading) > 0))
                     heading = (float)Math.PI - heading + (float)(rnd.NextDouble() - 0.5) * 0.6f;
                 if ((y < a.Top + Radius && Math.Sin(heading) < 0) || (y > a.Bottom - Radius && Math.Sin(heading) > 0))
                     heading = -heading + (float)(rnd.NextDouble() - 0.5) * 0.6f;
+            }
+
+            // Furniture: just turn away.
+            foreach (var f in m.Furniture)
+            {
+                float fx, fy;
+                if (!f.RobotHit(x, y, Radius * 0.85f, out fx, out fy)) continue;
+                float dot = (float)(Math.Cos(heading) * fx + Math.Sin(heading) * fy);
+                if (dot < 0)
+                {
+                    float vx = (float)Math.Cos(heading) - 2 * dot * fx, vy = (float)Math.Sin(heading) - 2 * dot * fy;
+                    heading = (float)Math.Atan2(vy, vx) + (float)(rnd.NextDouble() - 0.5) * 0.4f;
+                }
+                x += fx * 2; y += fy * 2;
             }
 
             // Bump into rugs: knock the edge up, turn away.
@@ -1961,6 +2480,8 @@ namespace WindowsRug
                 if (r.RobotHit(x, y, Radius * 0.85f, out nx, out ny))
                 {
                     bumped[r] = time;
+                    // Reached the rug with an icon: push it underneath.
+                    if (r == dropRug && carrying >= 0 && slideT < 0) { slideFrom = new PointF(x, y); slideT = 0; }
                     float dot = (float)(Math.Cos(heading) * nx + Math.Sin(heading) * ny);
                     if (dot < 0)
                     {
@@ -2011,6 +2532,168 @@ namespace WindowsRug
         }
     }
 
+    // A piece of living-room furniture: drag to move, right-click to turn or remove.
+    // The lamp switches on and off with a click.
+    public class FurnitureForm : LayeredWindow
+    {
+        public readonly string Kind;
+        readonly RugManager m;
+        public float X, Y;
+        public int Rot;           // quarter turns
+        public bool On;           // lamps only
+        Bitmap sprite, shadow, spriteOn, shadowOn;
+        int[] buf;
+        int bw, bh, bx, by;
+        Point downAt, downPos;
+        bool dragging, moved;
+
+        public static readonly string[] Kinds = { "sofa", "table", "lamp", "plant" };
+        public static readonly string[] Names = { "كنبة ركنة", "ترابيزة قهوة", "أباجورة", "نبات" };
+
+        public FurnitureForm(RugManager m, string kind)
+        {
+            this.m = m; Kind = kind;
+            LoadSheet(kind == "lamp" ? "lamp-off" : kind, out sprite, out shadow);
+            if (kind == "lamp") LoadSheet("lamp-on", out spriteOn, out shadowOn);
+            Cursor = Cursors.SizeAll;
+            ContextMenuStrip = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            ContextMenuStrip.Opening += delegate
+            {
+                var menu = ContextMenuStrip; menu.Items.Clear();
+                if (Kind == "lamp") menu.Items.Add(On ? "طفّي" : "نوّر", null, delegate { Toggle(); });
+                menu.Items.Add("لف", null, delegate { Rot = (Rot + 1) % 4; Redraw(); m.FurnitureChanged(this); });
+                menu.Items.Add("شيل", null, delegate { m.RemoveFurniture(this); });
+            };
+        }
+
+        void LoadSheet(string name, out Bitmap spr, out Bitmap shd)
+        {
+            spr = shd = null;
+            string p = Path.Combine(m.Dir, "furniture", name + ".png");
+            if (!File.Exists(p)) return;
+            using (var sheet = new Bitmap(p))
+            {
+                int w = sheet.Width / 2;
+                spr = sheet.Clone(new Rectangle(0, 0, w, sheet.Height), PixelFormat.Format32bppPArgb);
+                shd = sheet.Clone(new Rectangle(w, 0, w, sheet.Height), PixelFormat.Format32bppPArgb);
+            }
+        }
+
+        public float PieceScale { get { return Math.Max(0.7f, Math.Min(1.6f, Screen.PrimaryScreen.WorkingArea.Height / 1040f)); } }
+
+        public SizeF Footprint
+        {
+            get
+            {
+                if (sprite == null) return new SizeF(10, 10);
+                float w = sprite.Width * PieceScale, h = sprite.Height * PieceScale;
+                return Rot % 2 == 0 ? new SizeF(w, h) : new SizeF(h, w);
+            }
+        }
+
+        public void Redraw()
+        {
+            if (sprite == null) return;
+            var fp = Footprint;
+            bw = ((int)fp.Width + 40 + 3) & ~3; bh = (int)fp.Height + 40;
+            if (buf == null || buf.Length < bw * bh) buf = new int[bw * bh]; else Array.Clear(buf, 0, bw * bh);
+            var spr = On && spriteOn != null ? spriteOn : sprite;
+            var shd = On && shadowOn != null ? shadowOn : shadow;
+            float k = PieceScale;
+            PaintBuffer(buf, bw, bh, g =>
+            {
+                // Shadows fall to the bottom-right whichever way the piece is turned.
+                DrawRotated(g, shd, bw / 2f + 8 * k, bh / 2f + 11 * k, Rot * 90, k, null);
+                if (On) DrawRotated(g, spr, bw / 2f, bh / 2f, Rot * 90, k, null);
+                else using (var ia = Tinted(1)) DrawRotated(g, spr, bw / 2f, bh / 2f, Rot * 90, k, ia);
+            });
+            bx = (int)(X - bw / 2f); by = (int)(Y - bh / 2f);
+            Present(buf, bx, by, bw, bh);
+        }
+
+        void Reposition()
+        {
+            bx = (int)(X - bw / 2f); by = (int)(Y - bh / 2f);
+            Present(buf, bx, by, bw, bh);
+        }
+
+        public void Toggle() { On = !On; Redraw(); m.FurnitureChanged(this); }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Redraw(); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            downAt = Cursor.Position; downPos = new Point((int)X, (int)Y);
+            dragging = true; moved = false; Capture = true;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!dragging) return;
+            var p = Cursor.Position;
+            if (Math.Abs(p.X - downAt.X) + Math.Abs(p.Y - downAt.Y) > 4) moved = true;
+            if (!moved) return;
+            X = downPos.X + p.X - downAt.X; Y = downPos.Y + p.Y - downAt.Y;
+            Reposition();
+            if (Kind == "lamp" && On) m.FurnitureMoving(this);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (!dragging) return;
+            dragging = false; Capture = false;
+            if (!moved && Kind == "lamp") Toggle();
+            else m.FurnitureChanged(this);
+        }
+
+        // Robot bumper test against the piece's footprint.
+        public bool RobotHit(float x, float y, float r, out float nx, out float ny)
+        {
+            var fp = Footprint;
+            float hw = fp.Width * 0.45f, hh = fp.Height * 0.45f;
+            float qx = Math.Max(X - hw, Math.Min(X + hw, x)), qy = Math.Max(Y - hh, Math.Min(Y + hh, y));
+            float dx = x - qx, dy = y - qy, d = (float)Math.Sqrt(dx * dx + dy * dy);
+            nx = ny = 0;
+            if (d > r) return false;
+            if (d < 1e-3f) { dx = x - X; dy = y - Y; d = (float)Math.Sqrt(dx * dx + dy * dy) + 1e-3f; }
+            nx = dx / d; ny = dy / d;
+            return true;
+        }
+    }
+
+    // The warm pool of light around a lamp that is on. Clicks pass straight through.
+    public class GlowForm : LayeredWindow
+    {
+        int[] buf;
+        public GlowForm() { ClickThrough = true; }
+
+        public void Draw(float x, float y, float radius, float strength)
+        {
+            int size = ((int)(radius * 2) + 3) & ~3;
+            if (buf == null || buf.Length != size * size) buf = new int[size * size]; else Array.Clear(buf, 0, buf.Length);
+            PaintBuffer(buf, size, size, g =>
+            {
+                using (var path = new GraphicsPath())
+                {
+                    path.AddEllipse(0, 0, size, size);
+                    using (var br = new PathGradientBrush(path))
+                    {
+                        br.CenterColor = Color.FromArgb((int)(Math.Min(1, strength) * 190), 255, 206, 140);
+                        br.SurroundColors = new[] { Color.FromArgb(0, 255, 206, 140) };
+                        br.FocusScales = new PointF(0.15f, 0.15f);
+                        g.FillPath(br, path);
+                    }
+                }
+            });
+            if (!Visible) Show();
+            Present(buf, (int)(x - size / 2f), (int)(y - size / 2f), size, size);
+        }
+    }
+
     public class RugForm : LayeredWindow
     {
         public readonly int Id;
@@ -2026,8 +2709,6 @@ namespace WindowsRug
         bool rotated, breeze;
         readonly Dust dust = new Dust();
         readonly Cat cat = new Cat();
-        readonly LostItems lost;
-        int lostDay = -1;
         readonly System.Windows.Forms.Timer napTimer = new System.Windows.Forms.Timer();
         bool simAwake, clothDirty = true;
         int lastPad = -1;
@@ -2049,8 +2730,7 @@ namespace WindowsRug
             AllowDrop = true;
             if (m.CatSheet != null) cat.LoadSprites(m.CatSheet);
             renderer.TintR = m.TintR; renderer.TintG = m.TintG; renderer.TintB = m.TintB;
-            lost = new LostItems(m.ItemsSheet);
-            renderer.UnderLayer = (g, ox, oy) => lost.Draw(g, cloth, ox, oy, RugScale * 0.9f);
+            renderer.UnderLayer = (g, ox, oy) => m.DrawItemsUnder(this, g, ox, oy);
             if (!LoadState()) { LoadSource(); Rebuild(float.NaN, float.NaN); }
 
             tick.Interval = 15;
@@ -2119,8 +2799,6 @@ namespace WindowsRug
             renderer.CamY = wa.Top + wa.Height / 2f;
             int nx = Math.Max(8, (int)Math.Round(tex.W / 18f) + 1), ny = Math.Max(6, (int)Math.Round(tex.H / 18f) + 1);
             cloth = new Cloth(nx, ny, cx - tex.W / 2f, cy - tex.H / 2f, tex.W, tex.H);
-            lostDay = -1;
-            ScatterLost();
             clothDirty = true;
         }
 
@@ -2140,18 +2818,13 @@ namespace WindowsRug
             else { Rebuild(cloth.CenterX, cloth.CenterY); Wake(); }
         }
 
-        void ScatterLost()
-        {
-            int day = DateTime.Now.DayOfYear + DateTime.Now.Year * 400;
-            if (day == lostDay) return;
-            lostDay = day;
-            lost.Scatter(cloth, day * 31 + Id);
-        }
+        public float ItemScale { get { return RugScale * 0.9f; } }
+        public void SetLamps(List<float[]> lamps) { renderer.Lamps = lamps; clothDirty = true; if (IsHandleCreated) Render(); }
+        public void ItemsChanged() { clothDirty = true; if (IsHandleCreated) Render(); }
 
         public void OnClockChanged()
         {
             renderer.TintR = m.TintR; renderer.TintG = m.TintG; renderer.TintB = m.TintB;
-            ScatterLost();
             if (EffectiveDesign != sourceKey) Retexture();
             clothDirty = true;
             Render();
@@ -2165,6 +2838,24 @@ namespace WindowsRug
             for (int i = 0; i < cloth.N; i++) { cloth.Y[i] = cloth.PY[i] = other.cloth.CenterY + dy + cloth.Y[i] - cloth.CenterY; }
             clothDirty = true;
             Wake();
+        }
+
+        // Bring the rug back into view, flat, on top of the desktop layer.
+        public void Recall(int index)
+        {
+            if (!Visible) Show();
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            bool lost = !cloth.Healthy || !wa.IntersectsWith(new Rectangle(renderer.OX, renderer.OY, renderer.W, renderer.H));
+            if (lost) Rebuild(wa.Left + wa.Width / 2f + index * 60, wa.Top + wa.Height / 2f + index * 50);
+            SendToBottom();
+            cloth.BeginUnfold();
+            Wake();
+        }
+
+        void Heal()
+        {
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            Rebuild(wa.Left + wa.Width / 2f, wa.Top + wa.Height / 2f);
         }
 
         public void Forget()
@@ -2190,7 +2881,9 @@ namespace WindowsRug
                 // Let go: the rug's stiffness lets folds flop back open.
                 cloth.Memory = cloth.Grab < 0 && !cloth.Unfolding ? 0.005f : 0;
                 float moved = Math.Max(cloth.Step(), cloth.Step());
+                if (float.IsNaN(moved) || !cloth.Healthy) { Heal(); moved = 1; }
                 clothDirty = true;
+                m.ReassignItems();
                 KickUpDust();
                 bool free = cloth.Grab < 0 && !cloth.Unfolding && !cat.Hiding;
                 if (free && moved < 0.025f) calmFrames++;
@@ -2251,6 +2944,7 @@ namespace WindowsRug
             renderer.Pad = overlay ? 44 : 16;
             if (clothDirty || renderer.Pad != lastPad)
             {
+                m.ItemRectsFor(this, renderer.Extra);
                 renderer.Draw(cloth, tex);
                 clothDirty = false; lastPad = renderer.Pad;
             }
@@ -2311,6 +3005,21 @@ namespace WindowsRug
         public void EndChase() { if (cat.Chasing) { cat.EndChase(cloth); if (!tick.Enabled) tick.Start(); } }
 
         // ---- Robot ----
+        public bool ContainsFlat(Point p, float inset) { float u, v; ToFlat(p, out u, out v); return Math.Abs(u) < cloth.HalfW - inset && Math.Abs(v) < cloth.HalfH - inset; }
+
+        // A random spot well inside the rug, in screen coordinates.
+        public PointF RandomInside(Random r)
+        {
+            float cx, cy, cos, sin;
+            cloth.FitFlat(out cx, out cy, out cos, out sin);
+            float u = (float)(r.NextDouble() * 2 - 1) * cloth.HalfW * 0.6f, v = (float)(r.NextDouble() * 2 - 1) * cloth.HalfH * 0.55f;
+            return new PointF(cx + u * cos - v * sin, cy + u * sin + v * cos);
+        }
+
+        public PointF Center { get { return new PointF(cloth.CenterX, cloth.CenterY); } }
+
+        public void PokeAt(float x, float y) { cloth.Poke(x, y, 110 * RugScale, 6); Wake(); }
+
         public bool RobotHit(float x, float y, float r, out float nx, out float ny)
         {
             nx = ny = 0;
@@ -2426,7 +3135,7 @@ namespace WindowsRug
             string desk = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
             var icons = DesktopIcons.Read(lv);
-            SaveIconPositions(icons, false);
+            m.SaveIconPositions(icons, false);
             DesktopIcons.DisableSnap(lv);
             var sp = DesktopIcons.Spacing(lv);
             Point drop = new Point(e.X, e.Y);
@@ -2467,32 +3176,6 @@ namespace WindowsRug
             return false;
         }
 
-        void SaveIconPositions(List<DesktopIcons.Icon> icons, bool replace)
-        {
-            var saved = LoadIconPositions();
-            if (replace) saved.Clear();
-            foreach (var ic in icons) if (!saved.ContainsKey(ic.Name)) saved[ic.Name] = new Point(ic.X, ic.Y);
-            var lines = new List<string>();
-            foreach (var kv in saved) lines.Add(kv.Key + "\t" + kv.Value.X + "\t" + kv.Value.Y);
-            try { File.WriteAllLines(m.IconsFile, lines.ToArray(), System.Text.Encoding.UTF8); } catch { }
-        }
-
-        Dictionary<string, Point> LoadIconPositions()
-        {
-            var saved = new Dictionary<string, Point>();
-            try
-            {
-                if (File.Exists(m.IconsFile))
-                    foreach (var line in File.ReadAllLines(m.IconsFile, System.Text.Encoding.UTF8))
-                    {
-                        var f = line.Split('\t');
-                        if (f.Length == 3 && !saved.ContainsKey(f[0])) saved[f[0]] = new Point(int.Parse(f[1]), int.Parse(f[2]));
-                    }
-            }
-            catch { }
-            return saved;
-        }
-
         void SweepIcons()
         {
             IntPtr lv = DesktopIcons.FindListView();
@@ -2500,7 +3183,7 @@ namespace WindowsRug
             if (!CheckArrange(lv)) return;
             var icons = DesktopIcons.Read(lv);
             if (icons.Count == 0) return;
-            SaveIconPositions(icons, false);
+            m.SaveIconPositions(icons, false);
             DesktopIcons.DisableSnap(lv);
 
             // Pack the icons in a grid inside the flat rug, following its rotation.
@@ -2528,7 +3211,7 @@ namespace WindowsRug
         void RestoreIcons()
         {
             IntPtr lv = DesktopIcons.FindListView();
-            var saved = LoadIconPositions();
+            var saved = m.LoadIconPositions();
             if (lv == IntPtr.Zero || saved.Count == 0) { Say("مفيش أيقونات متخبية ترجع."); return; }
             DesktopIcons.DisableSnap(lv);
             var icons = DesktopIcons.Read(lv);
@@ -2593,6 +3276,14 @@ namespace WindowsRug
             floors.DropDownItems.Add(keep);
             menu.Items.Add(floors);
 
+            var room = new ToolStripMenuItem("الأوضة");
+            for (int i = 0; i < FurnitureForm.Kinds.Length; i++)
+            {
+                string kind = FurnitureForm.Kinds[i];
+                room.DropDownItems.Add(Toggle(FurnitureForm.Names[i], m.HasFurniture(kind), on => m.ToggleFurniture(kind)));
+            }
+            menu.Items.Add(room);
+
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("سجادة جديدة", null, delegate { m.AddRug(this); });
             if (m.Rugs.Count > 1) menu.Items.Add("شيل السجادة دي", null, delegate { m.RemoveRug(this); });
@@ -2603,7 +3294,11 @@ namespace WindowsRug
             menu.Items.Add(laserItem);
             menu.Items.Add(Toggle("قطة", m.S.Cat, on => m.SetCat(on)));
             menu.Items.Add(Toggle("مكنسة روبوت", m.S.Robot, on => m.SetRobot(on)));
-            if (m.S.Robot) menu.Items.Add("شغّل المكنسة دلوقتي", null, delegate { m.RunRobotNow(); });
+            if (m.S.Robot)
+            {
+                menu.Items.Add(Toggle("المكنسة تلم الأيقونات تحت السجادة", m.S.RobotTidies, on => { m.S.RobotTidies = on; m.S.Save(); }));
+                menu.Items.Add("شغّل المكنسة دلوقتي", null, delegate { m.RunRobotNow(); });
+            }
             menu.Items.Add(Toggle("هوا خفيف", breeze, on => { breeze = on; ScheduleBreeze(); SaveState(); }));
             menu.Items.Add(Toggle("إضاءة النهار والليل", m.S.DayNight, on => { m.S.DayNight = on; m.S.Save(); m.UpdateClock(true); }));
             menu.Items.Add(Toggle("ثيمات المواسم", m.S.Seasons, on => { m.S.Seasons = on; m.S.Save(); m.UpdateClock(true); }));
@@ -2671,8 +3366,7 @@ namespace WindowsRug
                     cloth.Y[i] = cloth.PY[i] = float.Parse(v[1], inv);
                     cloth.Z[i] = cloth.PZ[i] = float.Parse(v[2], inv);
                 }
-                if (!SystemInformation.VirtualScreen.Contains((int)cloth.CenterX, (int)cloth.CenterY))
-                    Rebuild(float.NaN, float.NaN);
+                if (!cloth.Healthy) Rebuild(float.NaN, float.NaN);
                 return true;
             }
             catch { return false; }
@@ -2680,7 +3374,7 @@ namespace WindowsRug
 
         public void SaveState()
         {
-            if (forgotten || cloth == null) return;
+            if (forgotten || cloth == null || !cloth.Healthy) return;
             try
             {
                 var inv = CultureInfo.InvariantCulture;

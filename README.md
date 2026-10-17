@@ -18,10 +18,12 @@
 - **More than one rug.** Add as many rugs as you like, each with its own design.
 - **Day and night.** The light shifts through the day: cool dawn, white noon, a golden evening and a lamp-lit night, on both the rug and the floor.
 - **Seasons.** During Ramadan the rug turns into a Ramadan rug with lanterns and a crescent, at Eid into an Eid rug, and in winter snow drifts in along the floor's edges. This follows the Hijri calendar automatically.
-- **Lost things under the rug.** Lift a corner and you may find a coin, a key, a lone sock... A new handful turns up every day.
+- **Lost things under the rug.** Lift a corner, or drag the rug away, and you may find a coin, a key, a lone sock... They stay on the floor where they were; click one to pick it up. A new handful turns up every day.
 - **Laser pointer.** Press **Ctrl+Alt+L** and the cursor becomes a red dot the cat chases and pounces on.
 - **Pet the cat.** Hover over the napping cat and it stretches, then rolls onto its back.
-- **Robot vacuum.** Now and then a little robot vacuum tours the desk and bumps into the rug's edges. Sometimes the cat rides it.
+- **Robot vacuum.** Now and then a little robot vacuum tours the desk and bumps into the rug's edges. It tidies up too: it picks up desktop icons lying around, carries them to the nearest rug and pushes them underneath. It also vacuums up any lost things left in the open. Sometimes the cat rides it.
+- **A living room.** A corner sofa, a coffee table with a mug of coffee, a floor lamp and a monstera, all seen from above and lit like the rug. Drag them anywhere, right-click to turn or remove them. Click the lamp to switch it on, and its warm light falls on the floor and the rug.
+- **Never lost.** A tray icon and **Ctrl+Alt+R** bring every rug back in front of you. If anything ever goes wrong, the rug resets itself instead of vanishing, and the error is written to `%APPDATA%\WindowsRug\error.log`.
 - **Lit and shaded in real time.** A small software rasterizer draws the woven texture with per-vertex lighting. It also draws soft drop shadows, shadows cast by folded layers, and a duller underside.
 - **Lives on the desktop layer.** The rug sits above your icons and below every app window. It stays put when you press Win+D, and it doesn't show up in the taskbar or in Alt+Tab.
 - **Zero cost when idle.** The simulation runs only while the rug is moving. Once it settles, the timer stops, the process sits at 0% CPU, and its working set is trimmed.
@@ -38,6 +40,8 @@
 ![Lost things, night light, laser chase, a happy cat](docs/features.jpg)
 
 ![Rug designs](docs/designs.jpg)
+
+![The living room at night](docs/room.jpg)
 
 **Double-click to shake it out:** however crumpled the rug is, it lifts, slides apart and lands flat again.
 
@@ -67,7 +71,10 @@ The installer:
 | Hover over the napping cat | It stretches and rolls over |
 | Drag a desktop file onto the rug | It goes under the rug |
 | Ctrl+Alt+L | Laser pointer on or off |
-| Right-click | **Sweep icons under the rug** · **Put icons back** · **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Rug design** · **Floor** · **New rug** · **Remove this rug** · **Laser** · **Cat** · **Robot vacuum** · **Breeze** · **Day and night** · **Seasons** · **Close** |
+| Ctrl+Alt+R, or click the tray icon | Bring every rug back into view |
+| Click the lamp | On / off |
+| Drag furniture, right-click it | Move it; turn or remove it |
+| Right-click | **Sweep icons under the rug** · **Put icons back** · **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Rug design** · **Floor** · **New rug** · **Remove this rug** · **Room** · **Laser** · **Cat** · **Robot vacuum** · **Robot tidies icons** · **Breeze** · **Day and night** · **Seasons** · **Close** |
 
 > To sweep icons under the rug, **Auto arrange icons** must be off: right-click the desktop → **View**. If **Align icons to grid** is on, Windows may nudge some icons back onto its grid later.
 
@@ -90,7 +97,8 @@ Double-click **`Uninstall.bat`**. This stops the rug, removes it from Startup, a
 | Cat | Pre-rendered sprites (8 walk frames and a curled-up nap), drawn over a cached copy of the rug frame so the rug isn't re-rendered. While it naps the process sleeps; a timer wakes it when the nap ends. Under the rug, it raises the desk locally and the cloth drapes over the lump. |
 | Icons | The desktop is a list view inside Explorer. Positions are set with `LVM_SETITEMPOSITION`; names and positions are read through a small block of Explorer's memory and saved to `%APPDATA%\WindowsRug\icons.txt` so they can be put back. |
 | Light and seasons | A clock tick every 5 minutes picks the light colour in 20-minute steps and the season (Hijri dates via `UmAlQuraCalendar`). Only when either changes is the wallpaper re-tinted and the rugs redrawn once. |
-| Robot, laser | Separate small layered windows that run only while active. The robot asks each rug for a hit test and pokes the cloth where it bumps. |
+| Robot, laser | Separate small layered windows that run only while active. The robot asks each rug and piece of furniture for a hit test and pokes the cloth where it bumps. Icons it tidies are moved live with `LVM_SETITEMPOSITION`. |
+| Room | Every piece of furniture is a static layered window: it costs nothing until you move it. A lamp that is on adds a click-through glow window and a point light the rug renderer uses. Windows are kept in order (furniture, robot, rugs, lost items, light) just above the desktop icons. |
 | Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. A watchdog adds damping if the rug keeps moving and puts it to sleep within about 7 seconds of being let go, whatever its shape. |
 
 ## Project layout
@@ -105,11 +113,13 @@ rug/
   cat.png           cat sprite sheet
   items.png         things lost under the rug
   robot.png         robot vacuum
+  furniture/*.png   sofa, table, lamp (off/on), plant
   wood.jpg          wallpaper
 tools/
   make_assets.py    procedurally generates rug.png and wood.jpg (Python 3, Pillow, NumPy)
   make_cat.py       renders the cat sprite sheet from a lit height-field model
   make_props.py     renders the lost items and the robot vacuum
+  make_furniture.py renders the living-room furniture
 ```
 
 ## Building manually
@@ -120,7 +130,7 @@ Add-Type -TypeDefinition (Get-Content rug\Rug.cs -Raw -Encoding UTF8) `
     -OutputAssembly WindowsRug.exe -OutputType WindowsApplication
 ```
 
-Copy `rugs/`, `floors/`, `cat.png`, `items.png` and `robot.png` next to the exe and run it.
+Copy `rugs/`, `floors/`, `furniture/`, `cat.png`, `items.png` and `robot.png` next to the exe and run it.
 
 ## License
 

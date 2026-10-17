@@ -1,26 +1,22 @@
-## Windows Rug v1.3.0
+## Windows Rug v1.4.0
 
-The biggest update yet: designs, seasons, a laser pointer and a robot vacuum.
+A living room, a tidy robot, and a fix for the rug vanishing.
 
-![Lost things, night light, laser chase, a happy cat](https://raw.githubusercontent.com/justahmmed/windows-rug/main/docs/features.jpg)
+![The living room at night](https://raw.githubusercontent.com/justahmmed/windows-rug/main/docs/room.jpg)
 
 ### What's new
 
-- **Drop files under the rug.** Drag a desktop file onto the rug and it slips underneath.
-- **Five rug designs**: vintage grey, classic red, kilim, Ramadan and Eid. Also **three floors**: oak, dark walnut and light ash. Or use any picture of your own for either.
-- **More than one rug.** Right-click → *New rug*.
-- **Day and night light.** Cool dawn, white noon, a golden evening and a lamp-lit night, on the rug and the floor.
-- **Seasons.** A Ramadan rug with lanterns and a crescent during Ramadan, an Eid rug at Eid, and snow on the floor in winter. This follows the Hijri calendar automatically.
-- **Lost things under the rug.** Lift a corner to find a coin, a key, a lone sock... New ones every day.
-- **Laser pointer** (**Ctrl+Alt+L**): the cat chases the red dot and pounces on it.
-- **Pet the cat.** Hover over it while it naps; it stretches and rolls onto its back.
-- **Robot vacuum.** It tours the desk now and then and bumps the rug's edges. Sometimes the cat rides along.
+- **A living room.** A corner sofa, a coffee table with a mug of coffee, a floor lamp and a monstera, all seen from above and lit like the rug. Drag them anywhere; right-click to turn or remove them; add or remove pieces from *Room* in the rug's menu.
+- **A real lamp.** Click it to switch it on. Its warm light pools on the floor and falls on the rug, and it matters most at night.
+- **The robot tidies up.** It picks up desktop icons lying around, carries them to the nearest rug and pushes them underneath. It also vacuums up any lost things left in the open. Turn it off with *Robot tidies icons*.
+- **Lost things stay where they fell.** Drag the rug away and the coin stays on the floor. Click it to pick it up.
 
-### Still light on resources
+### Fixes
 
-Everything here sleeps when nothing is moving. The light changes once every 20 minutes at most, the robot and laser run only while active, and the cat is pre-rendered.
+- **The rug could vanish after a double-click.** On some Windows versions the window could slip *under* the desktop. Every window now stays just above the desktop icons, never below them.
+- **Never lost again.** A tray icon and **Ctrl+Alt+R** bring every rug back in front of you. A rug with broken numbers resets itself instead of disappearing, and any error is logged to `%APPDATA%\WindowsRug\error.log` instead of closing the app.
 
 ### Install
 
 1. Download **WindowsRug.zip** below and extract it.
-2. Double-click **Install.bat**. It replaces any older version and keeps your rug as you left it.
+2. Double-click **Install.bat**. It replaces any older version.
