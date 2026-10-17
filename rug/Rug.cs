@@ -19,7 +19,7 @@ namespace WindowsRug
 {
     public static class App
     {
-        public const string Version = "1.4.1";
+        public const string Version = "1.4.2";
 
         public static void Log(Exception ex)
         {
@@ -1566,7 +1566,8 @@ namespace WindowsRug
             Present(buf, (int)ox, (int)oy, size, size);
         }
 
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Redraw(); }
+        // Drawn once the window is showing; drawing earlier is undone when Windows shows it.
+        protected override void OnShown(EventArgs e) { base.OnShown(e); Redraw(); }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -1726,7 +1727,7 @@ namespace WindowsRug
                     it.Owner = owner;
                     if (owner != null) owner.ItemsChanged();
                 }
-                if (owner == null && it.Form == null) { it.Form = new ItemForm(this, it); it.Form.Show(); Restack(); }
+                if (owner == null && it.Form == null) { it.Form = new ItemForm(this, it); it.Form.Show(); it.Form.Redraw(); Restack(); }
                 else if (owner != null && it.Form != null) { it.Form.Close(); it.Form = null; }
             }
         }
@@ -1837,16 +1838,29 @@ namespace WindowsRug
         readonly Dictionary<FurnitureForm, GlowForm> glows = new Dictionary<FurnitureForm, GlowForm>();
         string FurnitureFile { get { return Path.Combine(AppData, "furniture.txt"); } }
 
-        // Where each piece goes in a freshly furnished room (bottom-right corner).
-        static PointF DefaultSpot(string kind)
+        // A furnished room arranged around the main rug: the coffee table in the
+        // middle of the rug, the corner sofa wrapped round its bottom-right corner,
+        // the lamp beside the sofa's end and the plant by the rug's far corner.
+        PointF DefaultSpot(string kind)
         {
             var a = Screen.PrimaryScreen.WorkingArea;
             float k = Math.Max(0.7f, Math.Min(1.6f, a.Height / 1040f));
-            float sx = a.Right - 310 * k, sy = a.Bottom - 225 * k;
-            if (kind == "sofa") return new PointF(sx, sy);
-            if (kind == "table") return new PointF(sx - 70 * k, sy - 270 * k);
-            if (kind == "lamp") return new PointF(sx - 360 * k, sy + 120 * k);
-            return new PointF(a.Right - 130 * k, a.Top + 140 * k);
+            float cx = a.Left + a.Width / 2f, cy = a.Top + a.Height / 2f, hw = 300, hh = 190;
+            if (Rugs.Count > 0) { var c = Rugs[0].Center; cx = c.X; cy = c.Y; var h = Rugs[0].HalfSize; hw = h.Width; hh = h.Height; }
+            float sofaX = cx + hw * 0.55f + 60 * k, sofaY = cy + hh * 0.55f + 70 * k;
+            PointF p;
+            if (kind == "table") p = new PointF(cx - 20 * k, cy - 10 * k);
+            else if (kind == "sofa") p = new PointF(sofaX, sofaY);
+            else if (kind == "lamp") p = new PointF(sofaX - 300 * k - 70 * k, sofaY + 120 * k);
+            else p = new PointF(cx - hw - 70 * k, cy - hh - 30 * k);
+            // Keep every piece on screen.
+            return new PointF(Math.Max(a.Left + 80, Math.Min(a.Right - 80, p.X)), Math.Max(a.Top + 80, Math.Min(a.Bottom - 80, p.Y)));
+        }
+
+        static string FirstLine(string file)
+        {
+            var lines = File.ReadAllLines(file);
+            return lines.Length > 0 ? lines[0] : "";
         }
 
         public bool FurnitureFilesPresent
@@ -1877,9 +1891,11 @@ namespace WindowsRug
         void LoadFurniture()
         {
             var inv = CultureInfo.InvariantCulture;
-            if (!File.Exists(FurnitureFile))
+            bool oldLayout = false;
+            try { oldLayout = File.Exists(FurnitureFile) && FirstLine(FurnitureFile) != "layout2"; } catch { }
+            if (!File.Exists(FurnitureFile) || oldLayout)
             {
-                // First time: a corner sofa at the bottom right with a table, a lamp and a plant.
+                // First time (or the old corner layout): furnish around the rug.
                 foreach (var kind in FurnitureForm.Kinds) { var p = DefaultSpot(kind); AddFurniture(kind, p.X, p.Y, 0, kind == "lamp"); }
                 SaveFurniture();
                 return;
@@ -1888,6 +1904,7 @@ namespace WindowsRug
             {
                 foreach (var line in File.ReadAllLines(FurnitureFile))
                 {
+                    if (line == "layout2") continue;
                     var f = line.Split(' ');
                     if (f.Length != 5) continue;
                     float fx = float.Parse(f[1], inv), fy = float.Parse(f[2], inv);
@@ -1902,7 +1919,7 @@ namespace WindowsRug
         public void SaveFurniture()
         {
             var inv = CultureInfo.InvariantCulture;
-            var lines = new List<string>();
+            var lines = new List<string> { "layout2" };
             foreach (var f in Furniture) { float fx = f.X, fy = f.Y; lines.Add(f.Kind + " " + fx.ToString("0", inv) + " " + fy.ToString("0", inv) + " " + f.Rot + " " + (f.On ? "1" : "0")); }
             try { File.WriteAllLines(FurnitureFile, lines.ToArray()); } catch { }
         }
@@ -1912,6 +1929,7 @@ namespace WindowsRug
             var f = new FurnitureForm(this, kind) { X = x, Y = y, Rot = rot, On = on };
             Furniture.Add(f);
             f.Show();
+            f.Redraw();
             Restack();
             UpdateLights();
             return f;
@@ -2658,7 +2676,8 @@ namespace WindowsRug
 
         public void Toggle() { On = !On; Redraw(); m.FurnitureChanged(this); }
 
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Redraw(); }
+        // Drawn once the window is showing; drawing earlier is undone when Windows shows it.
+        protected override void OnShown(EventArgs e) { base.OnShown(e); Redraw(); }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -2787,6 +2806,8 @@ namespace WindowsRug
             Render();
             Wake();
         }
+
+        protected override void OnShown(EventArgs e) { base.OnShown(e); Render(); }
 
         // ---- Design ----
         string EffectiveDesign { get { string s = m.IsMainRug(this) ? m.SeasonalDesign : null; return s ?? design; } }
@@ -3056,6 +3077,7 @@ namespace WindowsRug
         }
 
         public PointF Center { get { return new PointF(cloth.CenterX, cloth.CenterY); } }
+        public SizeF HalfSize { get { return new SizeF(cloth.HalfW, cloth.HalfH); } }
 
         public void PokeAt(float x, float y) { cloth.Poke(x, y, 110 * RugScale, 6); Wake(); }
 
