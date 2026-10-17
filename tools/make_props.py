@@ -157,8 +157,25 @@ def paper(c):
     return h, solid(c, (236, 234, 226)), 0.0, 0.1
 
 
+def spilled_mug(c):
+    # The mug knocked off the table: on its side, coffee spreading on the floor.
+    puddle = c.ellipsoid(-8, 4, 20, 13, 0.8, 0.3, flat=0.9)
+    puddle = np.where(puddle > 0, puddle + c.noise(4) * 0.4, puddle)
+    body = c.box(4, -2, 11, 9, 14, 0.3, bevel=5)
+    rim = c.ellipsoid(-6, -5.5, 4, 9, 16, 0.3)
+    handle = (np.abs(np.sqrt((c.X - 10) ** 2 + (c.Y - 11) ** 2) - 5) < 1.8) & (c.Y > 8)
+    h = np.maximum(np.maximum(puddle, body), rim)
+    h = np.where(handle, 9, h)
+    alb = solid(c, (238, 236, 232))
+    wet = (puddle > 0) & (body <= 0) & (rim <= 0) & ~handle
+    alb = np.where(wet[..., None], np.array([62, 36, 20], np.float32), alb)
+    inside = np.sqrt(((c.X + 7) / 2.6) ** 2 + ((c.Y + 6) / 7) ** 2) < 1
+    alb = np.where(inside[..., None], np.array([40, 26, 16], np.float32), alb)
+    return h, alb, 0.9, 0.04
+
+
 def make_items():
-    makers = [coin, key, sock, button, candy, paper]
+    makers = [coin, key, sock, button, candy, paper, spilled_mug]
     cw = ch = 64
     sheet = Image.new("RGBA", (cw * len(makers), ch * 2), (0, 0, 0, 0))
     for i, fn in enumerate(makers):

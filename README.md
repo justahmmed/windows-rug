@@ -11,7 +11,7 @@
 - **Real cloth physics.** The rug is a mesh of about 750 particles. It has gravity, friction against the desk, and self-collision, so folds stack instead of passing through each other. Grab any point and the rug drags along behind your cursor. It wrinkles where it's pulled and settles when you let go.
 - **Behaves like a real rug.** It's heavy and stiff rather than floppy: lift a corner and it curls over, let go and it flops back open, just like the real thing. However you leave it, it relaxes flat on the desk and never ends up as a tangled heap.
 - **Sweep it under the rug.** One click gathers every desktop icon into a neat pile under the rug, then lifts the rug and drops it back over them. Another click puts every icon back where it was.
-- **A cat comes to visit.** Every few minutes a fluffy cat wanders onto the rug. Sometimes it curls up for a nap, sometimes it crawls underneath and you see a lump moving across the rug. Click the cat, or grab the rug, and it bolts. You can turn the cat off in the menu.
+- **A cat comes to visit.** Every few minutes a fluffy cat wanders onto the rug. Sometimes it curls up for a nap, sometimes it crawls underneath and you see a lump moving across the rug. Other times it jumps onto the sofa for a nap, or onto the coffee table, where it walks to the mug and knocks it onto the floor. Click the spilled mug to put it back. Click the cat, or grab the rug, and it bolts. You can turn the cat off in the menu.
 - **Dust puffs.** The rug kicks up a little dust when it slaps down on the desk.
 - **Drop files under the rug.** Drag any desktop file onto the rug and it slips underneath.
 - **Five designs and three floors.** Vintage grey, classic red, kilim, Ramadan and Eid rugs, on oak, dark walnut or light ash, or use any picture of your own for the rug or the floor.
@@ -22,7 +22,7 @@
 - **Laser pointer.** Press **Ctrl+Alt+L** and the cursor becomes a red dot the cat chases and pounces on.
 - **Pet the cat.** Hover over the napping cat and it stretches, then rolls onto its back.
 - **Robot vacuum.** Now and then a little robot vacuum tours the desk and bumps into the rug's edges. It tidies up too: it picks up desktop icons lying around, carries them to the nearest rug and pushes them underneath. It also vacuums up any lost things left in the open. Sometimes the cat rides it.
-- **A living room.** A corner sofa, a coffee table with a mug of coffee, a floor lamp and a monstera, all seen from above and lit like the rug. Drag them anywhere, right-click to turn or remove them. Click the lamp to switch it on, and its warm light falls on the floor and the rug.
+- **A living room.** A corner sofa, a coffee table with a mug of coffee, a floor lamp and a monstera, all seen from above and lit like the rug. Drag them anywhere; right-click to make them bigger or smaller, turn them or remove them. The rug always stays underneath the furniture, and the cat always walks on top. Click the lamp to switch it on, and its warm light falls on the floor and the rug.
 - **Never lost.** A tray icon and **Ctrl+Alt+R** bring every rug back in front of you. If anything ever goes wrong, the rug resets itself instead of vanishing, and the error is written to `%APPDATA%\WindowsRug\error.log`.
 - **Lit and shaded in real time.** A small software rasterizer draws the woven texture with per-vertex lighting. It also draws soft drop shadows, shadows cast by folded layers, and a duller underside.
 - **Lives on the desktop layer.** The rug sits above your icons and below every app window. It stays put when you press Win+D, and it doesn't show up in the taskbar or in Alt+Tab.
@@ -73,7 +73,7 @@ The installer:
 | Ctrl+Alt+L | Laser pointer on or off |
 | Ctrl+Alt+R, or click the tray icon | Bring every rug back into view |
 | Click the lamp | On / off |
-| Drag furniture, right-click it | Move it; turn or remove it |
+| Drag furniture, right-click it | Move it; make it bigger or smaller, turn or remove it |
 | Right-click | **Sweep icons under the rug** · **Put icons back** · **Flatten** · **Bigger** · **Smaller** · **Rotate** · **Rug design** · **Floor** · **New rug** · **Remove this rug** · **Room** · **Laser** · **Cat** · **Robot vacuum** · **Robot tidies icons** · **Breeze** · **Day and night** · **Seasons** · **Close** |
 
 > To sweep icons under the rug, **Auto arrange icons** must be off: right-click the desktop → **View**. If **Align icons to grid** is on, Windows may nudge some icons back onto its grid later.
@@ -98,7 +98,7 @@ Double-click **`Uninstall.bat`**. This stops the rug, removes it from Startup, a
 | Icons | The desktop is a list view inside Explorer. Positions are set with `LVM_SETITEMPOSITION`; names and positions are read through a small block of Explorer's memory and saved to `%APPDATA%\WindowsRug\icons.txt` so they can be put back. |
 | Light and seasons | A clock tick every 5 minutes picks the light colour in 20-minute steps and the season (Hijri dates via `UmAlQuraCalendar`). Only when either changes is the wallpaper re-tinted and the rugs redrawn once. |
 | Robot, laser | Separate small layered windows that run only while active. The robot asks each rug and piece of furniture for a hit test and pokes the cloth where it bumps. Icons it tidies are moved live with `LVM_SETITEMPOSITION`. |
-| Room | Every piece of furniture is a static layered window: it costs nothing until you move it. A lamp that is on adds a click-through glow window and a point light the rug renderer uses. Windows are kept in order (furniture, robot, rugs, lost items, light) just above the desktop icons. |
+| Room | Every piece of furniture is a static layered window: it costs nothing until you move it. A lamp that is on adds a click-through glow window and a point light the rug renderer uses. Windows are kept in a fixed order (cat, furniture, robot, rugs, lost items, light) just above the desktop icons; clicks never reorder them. |
 | Idle | Every frame measures the largest particle movement. After 40 calm frames the timer stops and the state is saved to `%APPDATA%\WindowsRug\state.txt`. A watchdog adds damping if the rug keeps moving and puts it to sleep within about 7 seconds of being let go, whatever its shape. |
 
 ## Project layout

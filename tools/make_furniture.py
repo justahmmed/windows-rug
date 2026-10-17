@@ -155,7 +155,7 @@ def lamp():
         save(c, col, np.clip(a * 1.3, 0, 1), "lamp-on" if on else "lamp-off", 7, 0.25 if on else 0.5)
 
 
-def table():
+def table(with_mug=True, name="table"):
     # Oval walnut coffee table with a mug of coffee and two books.
     W, H = 340, 220
     c = Canvas(W, H, 303)
@@ -184,6 +184,9 @@ def table():
     mug = np.where(mr < 17, 70, -1)
     handle = (np.abs(np.sqrt((c.X - 78) ** 2 + (c.Y + 10) ** 2) - 7) < 2.4) & (c.X > 72)
     mug = np.where(handle, 66, mug)
+    if not with_mug:
+        mug = np.full(mug.shape, -1.0)
+        mr = np.full(mr.shape, 1e9)
     m = mug > hh
     hh = np.where(m, mug, hh)
     hcol = np.where(m[..., None], np.array([238, 236, 232], np.float32), hcol)
@@ -198,7 +201,7 @@ def table():
     hl = np.exp(-(((c.X - 54) / 3) ** 2 + ((c.Y + 15) / 2) ** 2))
     col += (hl * 140)[..., None]
     a = blur(inside2.astype(np.float32), SS * 0.5)
-    save(c, col, np.clip(a * 1.3, 0, 1), "table", 7, 0.5)
+    save(c, col, np.clip(a * 1.3, 0, 1), name, 7, 0.5)
 
 
 def plant():
@@ -254,5 +257,6 @@ if __name__ == "__main__":
     sofa()
     lamp()
     table()
+    table(False, "table-nomug")
     plant()
     print("ok")
