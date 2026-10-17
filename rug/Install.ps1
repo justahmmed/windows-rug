@@ -8,7 +8,7 @@ $dst = Join-Path $env:LOCALAPPDATA 'WindowsRug'
 & (Join-Path $src 'Uninstall.ps1') -KeepFiles 2>$null
 
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
-foreach ($f in 'rug.png', 'wood.jpg', 'Uninstall.ps1', 'Uninstall.bat') {
+foreach ($f in 'rug.png', 'wood.jpg', 'cat.png', 'Uninstall.ps1', 'Uninstall.bat') {
     Copy-Item (Join-Path $src $f) $dst -Force
 }
 Get-ChildItem $dst | Unblock-File

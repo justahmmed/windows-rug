@@ -77,6 +77,31 @@ namespace WindowsRug
         public bool Unfolding { get { return UnfoldT >= 0; } }
         public float GrabX, GrabY, GrabZ, GrabLift;
         public float Memory;                // 0..1 pull back towards lying flat
+        public readonly float HalfW, HalfH;  // half size of the flat rug
+
+        // Something under the rug (the cat!) raises the desk locally.
+        public bool BumpOn;
+        public float BumpX, BumpY, BumpH, BumpR;
+
+        // Edge points that just hit the desk hard (for dust), and a one-shot
+        // flag for when an unfold lands.
+        public readonly List<int> Impacts = new List<int>();
+        public bool JustLanded;
+
+        public bool IsEdge(int i) { int a = i % NX, b = i / NX; return a == 0 || b == 0 || a == NX - 1 || b == NY - 1; }
+
+        // Point on the (possibly folded) rug at flat-layout coordinates u, v.
+        public void Sample(float u, float v, out float x, out float y, out float z)
+        {
+            float fi = (u - RX[0]) / (RX[1] - RX[0]), fj = (v - RY[0]) / (RY[NX] - RY[0]);
+            fi = Math.Max(0, Math.Min(NX - 1.001f, fi)); fj = Math.Max(0, Math.Min(NY - 1.001f, fj));
+            int i = (int)fi, j = (int)fj; float a = fi - i, b = fj - j;
+            int k = j * NX + i;
+            float w00 = (1 - a) * (1 - b), w10 = a * (1 - b), w01 = (1 - a) * b, w11 = a * b;
+            x = X[k] * w00 + X[k + 1] * w10 + X[k + NX] * w01 + X[k + NX + 1] * w11;
+            y = Y[k] * w00 + Y[k + 1] * w10 + Y[k + NX] * w01 + Y[k + NX + 1] * w11;
+            z = Z[k] * w00 + Z[k + 1] * w10 + Z[k + NX] * w01 + Z[k + NX + 1] * w11;
+        }
         public float Settling;              // 0..1 extra damping used to make the rug come to rest
         float MaxHeight { get { return Spacing * 6; } }
 
@@ -106,6 +131,7 @@ namespace WindowsRug
                     supported[k] = true;
                 }
 
+            HalfW = w / 2; HalfH = h / 2;
             RX = new float[N]; RY = new float[N];
             float mx0 = left + w / 2, my0 = top + h / 2;
             for (int k = 0; k < N; k++) { RX[k] = X[k] - mx0; RY[k] = Y[k] - my0; }
@@ -136,7 +162,7 @@ namespace WindowsRug
         public float CenterY { get { float s = 0; for (int i = 0; i < N; i++) s += Y[i]; return s / N; } }
 
         // Best-fit placement (centre and rotation) of the flat layout onto the current shape.
-        void FitFlat(out float cx, out float cy, out float cos, out float sin)
+        public void FitFlat(out float cx, out float cy, out float cos, out float sin)
         {
             cx = CenterX; cy = CenterY;
             double sc = 0, ss = 0;
@@ -195,7 +221,7 @@ namespace WindowsRug
                 X[i] = PX[i] = nx; Y[i] = PY[i] = ny; Z[i] = PZ[i] = nz;
                 supported[i] = nz <= 0.01f;
             }
-            if (t >= 1) UnfoldT = -1;
+            if (t >= 1) { UnfoldT = -1; JustLanded = true; }
             return Math.Max(maxMove, 1);
         }
 
@@ -288,10 +314,17 @@ namespace WindowsRug
             {
                 if (final) { supported[i] = false; onLayer[i] = false; }
                 if (Z[i] > MaxHeight) Z[i] = MaxHeight;
-                if (Z[i] <= 0)
+                float floor = 0;
+                if (BumpOn)
                 {
-                    Z[i] = 0;
-                    if (final) { supported[i] = true; PZ[i] = 0; }
+                    float dx = X[i] - BumpX, dy = Y[i] - BumpY;
+                    floor = BumpH * (float)Math.Exp(-(dx * dx + dy * dy) / (BumpR * BumpR));
+                }
+                if (Z[i] <= floor)
+                {
+                    if (final && PZ[i] - Z[i] > 1.4f && IsEdge(i)) Impacts.Add(i);
+                    Z[i] = floor;
+                    if (final) { supported[i] = true; PZ[i] = floor; }
                 }
             }
         }
@@ -398,13 +431,14 @@ namespace WindowsRug
         public int[] Out;              // premultiplied ARGB
         public int[] Hit;              // topmost triangle per pixel, -1 = none
         public float CamX, CamY;       // point on screen the camera looks straight down at
+        public int Pad = 16;           // margin around the rug (room for shadows, dust, the cat)
         float[] shadow, tmp, casterZ, depth;
         int capacity;
 
         // Light from the top-left; shadows fall bottom-right.
         const float SX = 0.45f, SY = 0.65f;
         const float CamH = 2200f;
-        const float Ambient = 0.5f, Diffuse = 0.62f;
+        const float Ambient = 0.36f, Diffuse = 0.8f;
         static readonly float LX, LY, LZ, Flat;
 
         static Renderer()
@@ -471,7 +505,7 @@ namespace WindowsRug
                     minY = Math.Min(minY, Math.Min(vy[k], syp)); maxY = Math.Max(maxY, Math.Max(vy[k], syp));
                 }
 
-            const int pad = 16;
+            int pad = Pad;
             OX = (int)Math.Floor(minX) - pad; OY = (int)Math.Floor(minY) - pad;
             W = ((int)Math.Ceiling(maxX) + pad - OX + 15) & ~15;
             H = ((int)Math.Ceiling(maxY) + pad - OY + 15) & ~15;
@@ -675,6 +709,401 @@ namespace WindowsRug
         }
     }
 
+    // A puff of dust kicked up when the rug slaps down on the desk.
+    public class Dust
+    {
+        struct Mote { public float X, Y, VX, VY, Life, Size, Span; }
+        readonly List<Mote> motes = new List<Mote>();
+        readonly Random rnd = new Random();
+        public int Count { get { return motes.Count; } }
+
+        public void Emit(float x, float y, float dx, float dy, int n, float scale)
+        {
+            for (int k = 0; k < n && motes.Count < 220; k++)
+            {
+                float ang = (float)Math.Atan2(dy, dx) + (float)(rnd.NextDouble() - 0.5) * 1.6f;
+                float sp = (15 + (float)rnd.NextDouble() * 60) * scale;
+                x += (float)(rnd.NextDouble() - 0.5) * 14 * scale; y += (float)(rnd.NextDouble() - 0.5) * 14 * scale;
+                motes.Add(new Mote {
+                    X = x, Y = y, VX = (float)Math.Cos(ang) * sp, VY = (float)Math.Sin(ang) * sp,
+                    Life = 1, Size = (7 + (float)rnd.NextDouble() * 10) * scale, Span = 0.8f + (float)rnd.NextDouble() * 0.9f });
+            }
+        }
+
+        public void Update(float dt)
+        {
+            for (int k = motes.Count - 1; k >= 0; k--)
+            {
+                var m = motes[k];
+                m.X += m.VX * dt; m.Y += m.VY * dt;
+                m.VX *= 0.93f; m.VY *= 0.93f; m.VY -= 4 * dt;   // drifts up a touch
+                m.Size += 16 * dt;
+                m.Life -= dt / m.Span;
+                if (m.Life <= 0) motes.RemoveAt(k); else motes[k] = m;
+            }
+        }
+
+        public void Draw(Graphics g, int ox, int oy)
+        {
+            foreach (var m in motes)
+            {
+                int a = (int)(34 * m.Life);
+                if (a <= 0) continue;
+                // Three soft layers fake a blurred puff.
+                for (int k = 0; k < 3; k++)
+                {
+                    float r = m.Size * (1 - k * 0.3f);
+                    using (var br = new SolidBrush(Color.FromArgb(a, 218, 208, 190)))
+                        g.FillEllipse(br, m.X - ox - r, m.Y - oy - r, r * 2, r * 2);
+                }
+            }
+        }
+    }
+
+    // A cat that now and then visits the rug: it naps on it, or crawls underneath
+    // (a moving lump). Nothing runs while it is away or asleep.
+    public class Cat
+    {
+        enum State { Away, Walk, Nap, Hide, Flee }
+        State state = State.Away;
+        bool napAfterWalk;
+        float u, v, heading, phase, alpha, napLeft, scale = 1;
+        readonly List<PointF> path = new List<PointF>();
+        readonly Random rnd = new Random();
+        float sx, sy, sz;   // last screen position
+
+        // Pre-rendered sprites from cat.png: 8 walk frames + sleeping, shadows below.
+        Bitmap[] sprites, shadows;
+        int cellW, cellH;
+
+        public void LoadSprites(Bitmap sheet)
+        {
+            const int frames = 9;
+            cellW = sheet.Width / frames; cellH = sheet.Height / 2;
+            sprites = new Bitmap[frames]; shadows = new Bitmap[frames];
+            for (int i = 0; i < frames; i++)
+            {
+                sprites[i] = sheet.Clone(new Rectangle(i * cellW, 0, cellW, cellH), PixelFormat.Format32bppPArgb);
+                shadows[i] = sheet.Clone(new Rectangle(i * cellW, cellH, cellW, cellH), PixelFormat.Format32bppPArgb);
+            }
+        }
+
+        public bool Visible { get { return state == State.Walk || state == State.Nap || state == State.Flee; } }
+        public bool Busy { get { return state == State.Walk || state == State.Hide || state == State.Flee; } }
+        public bool Present { get { return state != State.Away; } }
+        public bool Hiding { get { return state == State.Hide; } }
+        public bool Napping { get { return state == State.Nap; } }
+        public float NapLeft { get { return napLeft; } }
+        public void EndNap() { if (state == State.Nap) napLeft = 0; }
+
+        PointF EdgePoint(Cloth c, float inset)
+        {
+            float hw = c.HalfW * inset, hh = c.HalfH * inset;
+            switch (rnd.Next(4))
+            {
+                case 0: return new PointF(-hw, (float)(rnd.NextDouble() * 2 - 1) * hh);
+                case 1: return new PointF(hw, (float)(rnd.NextDouble() * 2 - 1) * hh);
+                case 2: return new PointF((float)(rnd.NextDouble() * 2 - 1) * hw, -hh);
+                default: return new PointF((float)(rnd.NextDouble() * 2 - 1) * hw, hh);
+            }
+        }
+
+        PointF Inside(Cloth c, float f)
+        {
+            return new PointF((float)(rnd.NextDouble() * 2 - 1) * c.HalfW * f, (float)(rnd.NextDouble() * 2 - 1) * c.HalfH * f);
+        }
+
+        public void Visit(Cloth c, float rugScale)
+        {
+            if (state != State.Away) return;
+            scale = rugScale * 2.3f;   // a cat is about a quarter of a rug's width
+            var start = EdgePoint(c, 0.9f);
+            u = start.X; v = start.Y; alpha = 0; phase = 0;
+            path.Clear();
+            if (rnd.NextDouble() < 0.6)
+            {
+                state = State.Walk; napAfterWalk = true;
+                path.Add(Inside(c, 0.5f));
+            }
+            else
+            {
+                state = State.Hide;
+                path.Add(Inside(c, 0.6f)); path.Add(Inside(c, 0.6f));
+                var end = EdgePoint(c, 0.92f); path.Add(end);
+            }
+            heading = (float)Math.Atan2(path[0].Y - v, path[0].X - u);
+        }
+
+        // Startled: run for the nearest edge.
+        public void Flee(Cloth c)
+        {
+            if (state == State.Away || state == State.Flee) return;
+            float hw = c.HalfW, hh = c.HalfH;
+            float[] d = { u + hw, hw - u, v + hh, hh - v };
+            int best = 0; for (int k = 1; k < 4; k++) if (d[k] < d[best]) best = k;
+            var p = best == 0 ? new PointF(-hw * 1.1f, v) : best == 1 ? new PointF(hw * 1.1f, v) : best == 2 ? new PointF(u, -hh * 1.1f) : new PointF(u, hh * 1.1f);
+            path.Clear(); path.Add(p);
+            if (state == State.Hide) alpha = 1;
+            state = State.Flee;
+            c.BumpOn = false;
+        }
+
+        public bool HitTest(Point p)
+        {
+            if (!Visible) return false;
+            float dx = p.X - sx, dy = p.Y - sy;
+            return dx * dx + dy * dy < 24 * 24 * scale * scale;
+        }
+
+        public void Update(float dt, Cloth c)
+        {
+            if (state == State.Away) return;
+            if (state == State.Nap)
+            {
+                napLeft -= dt;
+                if (napLeft <= 0) { state = State.Walk; napAfterWalk = false; path.Clear(); path.Add(EdgePoint(c, 1.1f)); }
+                return;
+            }
+            float speed = (state == State.Flee ? 190 : state == State.Hide ? 45 : 60) * scale;
+            if (path.Count > 0)
+            {
+                float tx = path[0].X - u, ty = path[0].Y - v, d = (float)Math.Sqrt(tx * tx + ty * ty);
+                float step = speed * dt;
+                if (d <= step) { u = path[0].X; v = path[0].Y; path.RemoveAt(0); }
+                else { u += tx / d * step; v += ty / d * step; }
+                float want = (float)Math.Atan2(ty, tx), diff = want - heading;
+                while (diff > Math.PI) diff -= (float)(2 * Math.PI);
+                while (diff < -Math.PI) diff += (float)(2 * Math.PI);
+                heading += diff * Math.Min(1, dt * 6);
+                phase += step / (6 * scale);
+            }
+            bool leaving = (state == State.Flee || (state == State.Walk && !napAfterWalk)) &&
+                           (Math.Abs(u) > c.HalfW * 0.9f || Math.Abs(v) > c.HalfH * 0.9f);
+            alpha = leaving ? Math.Max(0, alpha - dt * 3) : Math.Min(1, alpha + dt * 2.5f);
+
+            if (state == State.Hide)
+            {
+                float cx, cy, cos, sin;
+                c.FitFlat(out cx, out cy, out cos, out sin);
+                c.BumpOn = true;
+                c.BumpX = cx + u * cos - v * sin; c.BumpY = cy + u * sin + v * cos;
+                c.BumpH = 12 * scale; c.BumpR = 13 * scale;
+            }
+            if (path.Count == 0)
+            {
+                if (state == State.Walk && napAfterWalk) { state = State.Nap; napLeft = 60 + (float)rnd.NextDouble() * 120; }
+                else { state = State.Away; c.BumpOn = false; }
+            }
+            else if (leaving && alpha <= 0) { state = State.Away; c.BumpOn = false; }
+        }
+
+        public void Draw(Graphics g, Cloth c, int ox, int oy)
+        {
+            if (!Visible || alpha <= 0.01f) return;
+            c.Sample(u, v, out sx, out sy, out sz);
+            float cx, cy, cos, sin;
+            c.FitFlat(out cx, out cy, out cos, out sin);
+            float rugAngle = (float)Math.Atan2(sin, cos);
+            if (sprites != null) { DrawSprite(g, ox, oy, rugAngle); return; }
+            var st = g.Save();
+            g.TranslateTransform(sx - ox, sy - oy);
+            float s = scale * (1 + sz * 0.004f);
+            g.ScaleTransform(s, s);
+            int a = (int)(255 * alpha);
+            if (state == State.Nap) DrawCurled(g, a, rugAngle + heading);
+            else DrawWalking(g, a, (float)((rugAngle + heading) * 180 / Math.PI), (float)Math.Sin(phase));
+            g.Restore(st);
+        }
+
+        void DrawSprite(Graphics g, int ox, int oy, float rugAngle)
+        {
+            int frame = state == State.Nap ? 8 : (((int)(phase / (2 * Math.PI) * 8)) % 8 + 8) % 8;
+            float k = scale / 2.3f * (1 + sz * 0.004f);
+            float deg = (float)((rugAngle + heading) * 180 / Math.PI);
+            g.InterpolationMode = InterpolationMode.Bilinear;
+            using (var ia = new ImageAttributes())
+            {
+                var cm = new ColorMatrix { Matrix33 = alpha };
+                ia.SetColorMatrix(cm);
+                float rad = (float)(deg * Math.PI / 180), cs = (float)Math.Cos(rad) * k, sn = (float)Math.Sin(rad) * k;
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    // The shadow falls toward the bottom-right whatever way the cat faces.
+                    float off = pass == 0 ? 1 : 0;
+                    float px = sx - ox + off * 5 * k, py = sy - oy + off * 7 * k;
+                    float hx = cellW / 2f, hy = cellH / 2f;
+                    var dest = new[] {
+                        new PointF(px - hx * cs + hy * sn, py - hx * sn - hy * cs),   // top-left
+                        new PointF(px + hx * cs + hy * sn, py + hx * sn - hy * cs),   // top-right
+                        new PointF(px - hx * cs - hy * sn, py - hx * sn + hy * cs) }; // bottom-left
+                    var img = pass == 0 ? shadows[frame] : sprites[frame];
+                    g.DrawImage(img, dest, new RectangleF(0, 0, cellW, cellH), GraphicsUnit.Pixel, ia);
+                }
+            }
+        }
+
+        static readonly Color Fur = Color.FromArgb(226, 142, 66), Stripe = Color.FromArgb(176, 94, 38), Ear = Color.FromArgb(238, 170, 158);
+
+        static void DrawWalking(Graphics g, int a, float deg, float swing)
+        {
+            using (var sh = new SolidBrush(Color.FromArgb(a * 55 / 255, 0, 0, 0)))
+                g.FillEllipse(sh, -20, -8, 46, 22);
+            g.RotateTransform(deg);
+            using (var fur = new SolidBrush(Color.FromArgb(a, Fur)))
+            using (var dark = new SolidBrush(Color.FromArgb(a, Stripe)))
+            using (var ear = new SolidBrush(Color.FromArgb(a, Ear)))
+            using (var tail = new Pen(Color.FromArgb(a, Fur), 5.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var stripe = new Pen(Color.FromArgb(a, Stripe), 2.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                float s1 = swing * 5;
+                // legs
+                g.FillEllipse(dark, 10 + s1, -11, 8, 5); g.FillEllipse(dark, 10 - s1, 6, 8, 5);
+                g.FillEllipse(dark, -16 - s1, -11, 8, 5); g.FillEllipse(dark, -16 + s1, 6, 8, 5);
+                // tail
+                g.DrawBezier(tail, -18, 0, -28, swing * 4, -36, -swing * 6, -44, swing * 3 - 4);
+                // body
+                g.FillEllipse(fur, -22, -9.5f, 42, 19);
+                g.DrawArc(stripe, -14, -9, 6, 18, -70, 140);
+                g.DrawArc(stripe, -6, -9, 6, 18, -70, 140);
+                g.DrawArc(stripe, 2, -9, 6, 18, -70, 140);
+                // head
+                g.FillPolygon(fur, new[] { new PointF(20, -5), new PointF(23, -12), new PointF(27, -5) });
+                g.FillPolygon(fur, new[] { new PointF(20, 5), new PointF(23, 12), new PointF(27, 5) });
+                g.FillPolygon(ear, new[] { new PointF(21.5f, -5.5f), new PointF(23, -9.5f), new PointF(25, -5.5f) });
+                g.FillPolygon(ear, new[] { new PointF(21.5f, 5.5f), new PointF(23, 9.5f), new PointF(25, 5.5f) });
+                g.FillEllipse(fur, 15, -8, 17, 16);
+                g.DrawLine(stripe, 18, 0, 22, 0);
+                using (var eye = new SolidBrush(Color.FromArgb(a, 40, 30, 20)))
+                { g.FillEllipse(eye, 26, -4.5f, 2.6f, 2.6f); g.FillEllipse(eye, 26, 1.9f, 2.6f, 2.6f); }
+                using (var nose = new SolidBrush(Color.FromArgb(a, 220, 120, 120)))
+                    g.FillEllipse(nose, 30.2f, -1.2f, 2.4f, 2.4f);
+            }
+        }
+
+        static void DrawCurled(Graphics g, int a, float rad)
+        {
+            using (var sh = new SolidBrush(Color.FromArgb(a * 60 / 255, 0, 0, 0)))
+                g.FillEllipse(sh, -15, -13, 38, 36);
+            g.RotateTransform((float)(rad * 180 / Math.PI));
+            using (var fur = new SolidBrush(Color.FromArgb(a, Fur)))
+            using (var ear = new SolidBrush(Color.FromArgb(a, Ear)))
+            using (var tail = new Pen(Color.FromArgb(a, Fur), 6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var tailTip = new Pen(Color.FromArgb(a, Stripe), 6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var stripe = new Pen(Color.FromArgb(a, Stripe), 2.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var lid = new Pen(Color.FromArgb(a, 70, 45, 30), 1.2f))
+            {
+                g.FillEllipse(fur, -16, -15, 32, 30);
+                g.DrawArc(stripe, -10, -11, 20, 22, 200, 80);
+                g.DrawArc(stripe, -6, -7, 12, 14, 200, 80);
+                g.DrawArc(stripe, -12, -13, 24, 26, 300, 60);
+                g.DrawArc(tail, -17, -16, 34, 32, 20, 150);
+                g.DrawArc(tailTip, -17, -16, 34, 32, 155, 15);
+                // tucked head
+                g.FillPolygon(fur, new[] { new PointF(2, -12), new PointF(4, -19), new PointF(8, -12) });
+                g.FillPolygon(fur, new[] { new PointF(10, -11), new PointF(15, -16), new PointF(15, -8) });
+                g.FillPolygon(ear, new[] { new PointF(3.5f, -12.5f), new PointF(4.5f, -16.5f), new PointF(7, -12.5f) });
+                g.FillEllipse(fur, 0, -14, 17, 15);
+                g.DrawArc(lid, 4, -8, 4, 3, 0, 180);
+                g.DrawArc(lid, 10, -8, 4, 3, 0, 180);
+            }
+        }
+    }
+
+    // Moves the real desktop icons (the shell's list view lives in Explorer, so
+    // reading positions and names goes through a small block of its memory).
+    public static class DesktopIcons
+    {
+        [DllImport("user32.dll")] static extern IntPtr FindWindow(string cls, string name);
+        [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string name);
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int idx);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+        [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hWnd, ref Point p);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr proc, IntPtr addr, IntPtr size, uint type, uint protect);
+        [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr proc, IntPtr addr, IntPtr size, uint type);
+        [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+        [DllImport("kernel32.dll")] static extern bool WriteProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, IntPtr size, out IntPtr written);
+
+        const int LVM_FIRST = 0x1000, LVM_GETITEMCOUNT = LVM_FIRST + 4, LVM_SETITEMPOSITION = LVM_FIRST + 15,
+                  LVM_GETITEMPOSITION = LVM_FIRST + 16, LVM_GETITEMSPACING = LVM_FIRST + 51,
+                  LVM_SETEXTENDEDLISTVIEWSTYLE = LVM_FIRST + 54, LVM_GETITEMTEXTW = LVM_FIRST + 115;
+        const int LVS_AUTOARRANGE = 0x100, LVS_EX_SNAPTOGRID = 0x80000, GWL_STYLE = -16;
+
+        public class Icon { public string Name; public int X, Y; }
+
+        public static IntPtr FindListView()
+        {
+            IntPtr def = FindWindowEx(FindWindow("Progman", null), IntPtr.Zero, "SHELLDLL_DefView", null);
+            IntPtr w = IntPtr.Zero;
+            while (def == IntPtr.Zero && (w = FindWindowEx(IntPtr.Zero, w, "WorkerW", null)) != IntPtr.Zero)
+                def = FindWindowEx(w, IntPtr.Zero, "SHELLDLL_DefView", null);
+            return def == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(def, IntPtr.Zero, "SysListView32", null);
+        }
+
+        public static bool AutoArrange(IntPtr lv) { return (GetWindowLong(lv, GWL_STYLE) & LVS_AUTOARRANGE) != 0; }
+
+        public static Size Spacing(IntPtr lv)
+        {
+            long r = SendMessage(lv, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero).ToInt64();
+            int cx = (int)(r & 0xFFFF), cy = (int)((r >> 16) & 0xFFFF);
+            return new Size(cx > 0 ? cx : 76, cy > 0 ? cy : 86);
+        }
+
+        public static List<Icon> Read(IntPtr lv)
+        {
+            var list = new List<Icon>();
+            int n = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            uint pid; GetWindowThreadProcessId(lv, out pid);
+            IntPtr proc = OpenProcess(0x0008 | 0x0010 | 0x0020, false, pid);
+            if (proc == IntPtr.Zero) return list;
+            IntPtr mem = VirtualAllocEx(proc, IntPtr.Zero, new IntPtr(4096), 0x3000, 0x04);
+            try
+            {
+                var buf = new byte[1024]; IntPtr done;
+                for (int i = 0; i < n; i++)
+                {
+                    SendMessage(lv, LVM_GETITEMPOSITION, new IntPtr(i), mem);
+                    ReadProcessMemory(proc, mem, buf, new IntPtr(8), out done);
+                    var ic = new Icon { X = BitConverter.ToInt32(buf, 0), Y = BitConverter.ToInt32(buf, 4) };
+                    // LVITEMW with pszText pointing at the second half of the block.
+                    var item = new byte[64];
+                    IntPtr text = new IntPtr(mem.ToInt64() + 1024);
+                    int textOff = IntPtr.Size == 8 ? 24 : 20;
+                    BitConverter.GetBytes(i).CopyTo(item, 4);
+                    if (IntPtr.Size == 8) BitConverter.GetBytes(text.ToInt64()).CopyTo(item, textOff);
+                    else BitConverter.GetBytes(text.ToInt32()).CopyTo(item, textOff);
+                    BitConverter.GetBytes(260).CopyTo(item, textOff + IntPtr.Size);
+                    WriteProcessMemory(proc, mem, item, new IntPtr(item.Length), out done);
+                    int len = SendMessage(lv, LVM_GETITEMTEXTW, new IntPtr(i), mem).ToInt32();
+                    ReadProcessMemory(proc, text, buf, new IntPtr(Math.Min(1024, Math.Max(0, len) * 2)), out done);
+                    ic.Name = System.Text.Encoding.Unicode.GetString(buf, 0, Math.Min(1024, Math.Max(0, len) * 2));
+                    list.Add(ic);
+                }
+            }
+            finally
+            {
+                VirtualFreeEx(proc, mem, IntPtr.Zero, 0x8000);
+                CloseHandle(proc);
+            }
+            return list;
+        }
+
+        public static void Move(IntPtr lv, int index, int x, int y)
+        {
+            SendMessage(lv, LVM_SETITEMPOSITION, new IntPtr(index), new IntPtr((y << 16) | (x & 0xFFFF)));
+        }
+
+        // Grid snapping would push packed icons back out from under the rug.
+        public static void DisableSnap(IntPtr lv)
+        {
+            SendMessage(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, new IntPtr(LVS_EX_SNAPTOGRID), IntPtr.Zero);
+        }
+
+        public static Point ToClient(IntPtr lv, Point screen) { ScreenToClient(lv, ref screen); return screen; }
+    }
+
     public class RugForm : Form
     {
         // ---- Win32 ----
@@ -716,7 +1145,14 @@ namespace WindowsRug
         Cloth cloth;
         readonly Renderer renderer = new Renderer();
         float scale = 0.6f;
-        bool rotated, breeze;
+        bool rotated, breeze, catOn = true;
+        readonly Dust dust = new Dust();
+        readonly Cat cat = new Cat();
+        readonly System.Windows.Forms.Timer catTimer = new System.Windows.Forms.Timer();
+        bool simAwake, clothDirty = true;
+        int lastPad = -1;
+        int[] work;
+        string iconsFile;
 
         readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer breezeTimer = new System.Windows.Forms.Timer();
@@ -733,6 +1169,7 @@ namespace WindowsRug
             string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsRug");
             Directory.CreateDirectory(appData);
             stateFile = Path.Combine(appData, "state.txt");
+            iconsFile = Path.Combine(appData, "icons.txt");
 
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -741,12 +1178,16 @@ namespace WindowsRug
             Location = new Point(-32000, -32000);
 
             source = new Bitmap(Path.Combine(dir, "rug.png"));
+            string catSheet = Path.Combine(dir, "cat.png");
+            if (File.Exists(catSheet)) using (var sheet = new Bitmap(catSheet)) cat.LoadSprites(sheet);
             if (!LoadState()) Rebuild(float.NaN, float.NaN);
 
             tick.Interval = 15;
             tick.Tick += delegate { Frame(); };
             breezeTimer.Tick += delegate { Gust(); };
             ScheduleBreeze();
+            catTimer.Tick += delegate { CatVisit(); };
+            ScheduleCat(true);
             BuildMenu();
         }
 
@@ -818,43 +1259,109 @@ namespace WindowsRug
             cloth = new Cloth(nx, ny, cx - tex.W / 2f, cy - tex.H / 2f, tex.W, tex.H);
         }
 
-        // ---- Simulation loop (runs only while something moves) ----
-        void Wake() { calmFrames = 0; restlessFrames = 0; cloth.Settling = 0; if (!tick.Enabled) tick.Start(); }
+        // ---- Main loop: runs only while the rug, the cat or the dust moves ----
+        void Wake()
+        {
+            simAwake = true; calmFrames = 0; restlessFrames = 0; cloth.Settling = 0;
+            if (!tick.Enabled) tick.Start();
+        }
+
+        float RugScale { get { return tex.W / 610f; } }
 
         void Frame()
         {
-            // Let go: the rug's stiffness lets folds flop back open.
-            cloth.Memory = cloth.Grab < 0 && !cloth.Unfolding ? 0.005f : 0;
-            float moved = Math.Max(cloth.Step(), cloth.Step());
+            const float dt = 0.016f;
+            if (simAwake)
+            {
+                // Let go: the rug's stiffness lets folds flop back open.
+                cloth.Memory = cloth.Grab < 0 && !cloth.Unfolding ? 0.005f : 0;
+                float moved = Math.Max(cloth.Step(), cloth.Step());
+                clothDirty = true;
+                KickUpDust();
+                bool free = cloth.Grab < 0 && !cloth.Unfolding && !cat.Hiding;
+                if (free && moved < 0.025f) calmFrames++;
+                else calmFrames = 0;
+                // Watchdog: a rug that keeps fidgeting is damped down and put to sleep,
+                // so a tangled heap can never keep the CPU busy.
+                restlessFrames = free ? restlessFrames + 1 : 0;
+                cloth.Settling = Math.Max(0, Math.Min(0.9f, (restlessFrames - 180) / 150f));
+                if (calmFrames > 40 || restlessFrames > 420) SimSleep();
+            }
+            bool hidingBefore = cat.Hiding;
+            cat.Update(dt, cloth);
+            if (cat.Hiding || hidingBefore) Wake();     // the lump under the rug needs physics
+            dust.Update(dt);
             Render();
-            bool free = cloth.Grab < 0 && !cloth.Unfolding;
-            if (free && moved < 0.025f) calmFrames++;
-            else calmFrames = 0;
-            // Watchdog: a rug that keeps fidgeting is damped down and put to sleep,
-            // so a tangled heap can never keep the CPU busy.
-            restlessFrames = free ? restlessFrames + 1 : 0;
-            cloth.Settling = Math.Max(0, Math.Min(0.9f, (restlessFrames - 180) / 150f));
-            if (calmFrames > 40 || restlessFrames > 420) Sleep();
+            if (!simAwake && !cat.Busy && dust.Count == 0)
+            {
+                tick.Stop();
+                // A napping cat is static; its timer wakes it when the nap is over.
+                if (cat.Napping) { catTimer.Interval = Math.Max(1000, (int)(cat.NapLeft * 1000)); catTimer.Enabled = true; }
+                GC.Collect();
+                try { SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1)); } catch { }
+            }
         }
 
-        void Sleep()
+        void KickUpDust()
         {
-            tick.Stop();
+            float s = RugScale;
+            float cx = cloth.CenterX, cy = cloth.CenterY;
+            if (cloth.Impacts.Count > 0)
+            {
+                foreach (int i in cloth.Impacts)
+                    dust.Emit(cloth.X[i], cloth.Y[i], cloth.X[i] - cx, cloth.Y[i] - cy, 2, s);
+                cloth.Impacts.Clear();
+            }
+            if (cloth.JustLanded)
+            {
+                cloth.JustLanded = false;
+                for (int i = 0; i < cloth.N; i += 2)
+                    if (cloth.IsEdge(i)) dust.Emit(cloth.X[i], cloth.Y[i], cloth.X[i] - cx, cloth.Y[i] - cy, 1, s);
+            }
+        }
+
+        void SimSleep()
+        {
+            simAwake = false;
             cloth.Settling = 0;
             for (int i = 0; i < cloth.N; i++)
             {
                 cloth.PX[i] = cloth.X[i]; cloth.PY[i] = cloth.Y[i]; cloth.PZ[i] = cloth.Z[i];
             }
             SaveState();
-            GC.Collect();
-            try { SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1)); } catch { }
         }
 
         void Render()
         {
             if (!IsHandleCreated) return;
-            renderer.Draw(cloth, tex);
+            bool overlay = dust.Count > 0 || cat.Visible;
+            renderer.Pad = overlay ? 44 : 16;
+            if (clothDirty || renderer.Pad != lastPad)
+            {
+                renderer.Draw(cloth, tex);
+                clothDirty = false; lastPad = renderer.Pad;
+            }
             int w = renderer.W, h = renderer.H;
+            int[] buf = renderer.Out;
+            if (overlay)
+            {
+                // Cat and dust are drawn over a copy, so the rug itself isn't re-rendered.
+                if (work == null || work.Length < w * h) work = new int[renderer.Out.Length];
+                Array.Copy(renderer.Out, work, w * h);
+                var pin = GCHandle.Alloc(work, GCHandleType.Pinned);
+                try
+                {
+                    using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, pin.AddrOfPinnedObject()))
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        cat.Draw(g, cloth, renderer.OX, renderer.OY);
+                        dust.Draw(g, renderer.OX, renderer.OY);
+                    }
+                }
+                finally { pin.Free(); }
+                buf = work;
+            }
             IntPtr screenDc = GetDC(IntPtr.Zero);
             if (w != dibW || h != dibH)
             {
@@ -865,13 +1372,103 @@ namespace WindowsRug
                 oldBmp = SelectObject(memDc, dib);
                 dibW = w; dibH = h;
             }
-            Marshal.Copy(renderer.Out, 0, dibBits, w * h);
+            Marshal.Copy(buf, 0, dibBits, w * h);
             var size = new SIZE(w, h);
             var src = new POINT(0, 0);
             var dst = new POINT(renderer.OX, renderer.OY);
             var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
             UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
             ReleaseDC(IntPtr.Zero, screenDc);
+        }
+
+        // ---- Cat ----
+        void ScheduleCat(bool soon)
+        {
+            catTimer.Interval = soon ? 45000 + rnd.Next(60000) : 180000 + rnd.Next(240000);
+            catTimer.Enabled = catOn;
+        }
+
+        void CatVisit()
+        {
+            if (cat.Napping) { cat.EndNap(); ScheduleCat(false); if (!tick.Enabled) tick.Start(); return; }
+            ScheduleCat(false);
+            if (!catOn || cloth.Grab >= 0 || cat.Present) return;
+            cat.Visit(cloth, RugScale);
+            Wake();
+        }
+
+        // ---- Sweep icons under the rug ----
+        void SweepIcons()
+        {
+            IntPtr lv = DesktopIcons.FindListView();
+            if (lv == IntPtr.Zero) { Say("مش لاقي أيقونات سطح المكتب."); return; }
+            if (DesktopIcons.AutoArrange(lv))
+            {
+                Say("اقفل الترتيب التلقائي الأول: كليك يمين على سطح المكتب ← View ← شيل العلامة من Auto arrange icons، وبعدين جرب تاني.");
+                return;
+            }
+            var icons = DesktopIcons.Read(lv);
+            if (icons.Count == 0) return;
+            if (!File.Exists(iconsFile))
+            {
+                var lines = new List<string>();
+                foreach (var ic in icons) lines.Add(ic.Name + "\t" + ic.X + "\t" + ic.Y);
+                try { File.WriteAllLines(iconsFile, lines.ToArray(), System.Text.Encoding.UTF8); } catch { }
+            }
+            DesktopIcons.DisableSnap(lv);
+
+            // Pack the icons in a grid inside the flat rug, following its rotation.
+            var sp = DesktopIcons.Spacing(lv);
+            float cx, cy, cos, sin;
+            cloth.FitFlat(out cx, out cy, out cos, out sin);
+            float uw = cloth.HalfW * 1.6f, vh = cloth.HalfH * 1.5f;
+            float cw = sp.Width * 0.8f, ch = sp.Height * 0.8f;
+            int cols = Math.Max(1, (int)(uw / cw));
+            int rows = (icons.Count + cols - 1) / cols;
+            if (rows * ch > vh) ch = vh / rows;
+            if (cols > icons.Count) { cols = icons.Count; }
+            for (int k = 0; k < icons.Count; k++)
+            {
+                float u = ((k % cols) - (cols - 1) / 2f) * cw, v = ((k / cols) - (rows - 1) / 2f) * ch;
+                var p = new Point((int)(cx + u * cos - v * sin - sp.Width / 2f), (int)(cy + u * sin + v * cos - sp.Height / 2f));
+                p = DesktopIcons.ToClient(lv, p);
+                DesktopIcons.Move(lv, k, p.X, p.Y);
+            }
+            // Lift the rug and drop it back over them.
+            cloth.BeginUnfold();
+            Wake();
+        }
+
+        void RestoreIcons()
+        {
+            IntPtr lv = DesktopIcons.FindListView();
+            if (lv == IntPtr.Zero || !File.Exists(iconsFile)) { Say("مفيش أيقونات متكنّسة ترجع."); return; }
+            var saved = new Dictionary<string, Point>();
+            try
+            {
+                foreach (var line in File.ReadAllLines(iconsFile, System.Text.Encoding.UTF8))
+                {
+                    var f = line.Split('\t');
+                    if (f.Length == 3 && !saved.ContainsKey(f[0])) saved[f[0]] = new Point(int.Parse(f[1]), int.Parse(f[2]));
+                }
+            }
+            catch { }
+            DesktopIcons.DisableSnap(lv);
+            var icons = DesktopIcons.Read(lv);
+            for (int k = 0; k < icons.Count; k++)
+            {
+                Point p;
+                if (saved.TryGetValue(icons[k].Name, out p)) DesktopIcons.Move(lv, k, p.X, p.Y);
+            }
+            try { File.Delete(iconsFile); } catch { }
+            cloth.BeginUnfold();
+            Wake();
+        }
+
+        static void Say(string text)
+        {
+            MessageBox.Show(text, "Windows Rug", MessageBoxButtons.OK, MessageBoxIcon.Information,
+                MessageBoxDefaultButton.Button1, MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
         }
 
         void FreeDib()
@@ -896,7 +1493,9 @@ namespace WindowsRug
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
             Point m = Cursor.Position;
+            if (cat.HitTest(m)) { cat.Flee(cloth); Wake(); return; }
             int t = TriangleAt(m);
+            if (t >= 0 && cat.Present) cat.Flee(cloth);     // grabbing the rug startles the cat
             if (t >= 0 && e.Clicks >= 2) { cloth.BeginUnfold(); Wake(); return; }
             cloth.CancelUnfold();
             if (t < 0) return;
@@ -953,6 +1552,9 @@ namespace WindowsRug
         void BuildMenu()
         {
             var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            menu.Items.Add("كنّس الأيقونات تحت السجادة", null, delegate { SweepIcons(); });
+            menu.Items.Add("رجّع الأيقونات مكانها", null, delegate { RestoreIcons(); });
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("افرد السجادة", null, delegate { cloth.BeginUnfold(); Wake(); });
             menu.Items.Add("كبّر", null, delegate { ScaleRug(1.15f); });
             menu.Items.Add("صغّر", null, delegate { ScaleRug(1 / 1.15f); });
@@ -960,6 +1562,14 @@ namespace WindowsRug
             var breezeItem = new ToolStripMenuItem("هوا خفيف") { CheckOnClick = true, Checked = breeze };
             breezeItem.CheckedChanged += delegate { breeze = breezeItem.Checked; ScheduleBreeze(); SaveState(); };
             menu.Items.Add(breezeItem);
+            var catItem = new ToolStripMenuItem("قطة") { CheckOnClick = true, Checked = catOn };
+            catItem.CheckedChanged += delegate
+            {
+                catOn = catItem.Checked;
+                if (catOn) { ScheduleCat(true); } else { catTimer.Enabled = false; cat.Flee(cloth); Wake(); }
+                SaveState();
+            };
+            menu.Items.Add(catItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("اقفل السجادة", null, delegate { SaveState(); Close(); });
             ContextMenuStrip = menu;
@@ -998,6 +1608,7 @@ namespace WindowsRug
                     if (kv[0] == "scale") scale = float.Parse(kv[1], inv);
                     else if (kv[0] == "rotated") rotated = kv[1] == "1";
                     else if (kv[0] == "breeze") breeze = kv[1] == "1";
+                    else if (kv[0] == "cat") catOn = kv[1] == "1";
                     else if (kv[0] == "grid") { var g = kv[1].Split('x'); nx = int.Parse(g[0]); ny = int.Parse(g[1]); }
                 }
                 Rebuild(float.NaN, float.NaN);
@@ -1023,7 +1634,7 @@ namespace WindowsRug
                 var inv = CultureInfo.InvariantCulture;
                 var lines = new List<string> {
                     "scale=" + scale.ToString(inv), "rotated=" + (rotated ? "1" : "0"),
-                    "breeze=" + (breeze ? "1" : "0"), "grid=" + cloth.NX + "x" + cloth.NY,
+                    "breeze=" + (breeze ? "1" : "0"), "cat=" + (catOn ? "1" : "0"), "grid=" + cloth.NX + "x" + cloth.NY,
                 };
                 for (int i = 0; i < cloth.N; i++)
                     lines.Add(cloth.X[i].ToString("0.##", inv) + " " + cloth.Y[i].ToString("0.##", inv) + " " + cloth.Z[i].ToString("0.##", inv));
@@ -1036,6 +1647,7 @@ namespace WindowsRug
         {
             tick.Stop();
             breezeTimer.Stop();
+            catTimer.Stop();
             FreeDib();
             base.OnFormClosed(e);
         }
